@@ -1,0 +1,21 @@
+{
+  "hooks": {
+    "PostToolUse": [
+      {
+        "matcher": "Write|Edit|MultiEdit",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "/usr/bin/python3",
+            "args": [
+              "<DOCS>/规范/交接写时门/handoff_gate.py",
+              "--hook"
+            ],
+            "timeout": 20,
+            "statusMessage": "交接报告写后检查"
+          }
+        ]
+      }
+    ]
+  }
+}

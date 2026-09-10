@@ -1,0 +1,7 @@
+# crontab -e   (times are machine-local; set CRON_TZ=Asia/Shanghai if your cron supports it)
+# 兜底扫描：每 4 小时把没过写后检查的报告写进待处理清单（覆盖不经钩子的写入者，如 Codex）
+# 每台机器写自己那份清单（这台叫 -本机名.md），docs 双向同步时才不会互相覆盖；锁与日志放同步域外
+23 */4 * * * cd <DOCS>/.. && /usr/bin/flock -n <RUNTIME>/handoff-gate.lock /usr/bin/timeout 120 /usr/bin/python3 <DOCS>/规范/交接写时门/handoff_gate.py --scan <DOCS>/工作传递 --since 8 --todo <DOCS>/工作传递/写后检查-待处理-<本机名>.md --writer "<本机名> cron 每 4 小时" >> <RUNTIME>/handoff-gate.log 2>&1 # handoff-gate-<本机名>
+# 退出码：0 全过 · 1 有不合格报告（正常，不是崩溃）· 2 漏查或清单写不出
+# 每日学习：只在这台机器是唯一发布者时才装（需要已登录的 claude CLI 与额度，每次约 $0.65，每天最多一次）
+# 3 9 * * * /usr/bin/python3 <DOCS>/规范/交接写时门/handoff_lessons.py daily <DOCS>/工作传递/协作教训.md --docs <DOCS> --model sonnet

@@ -1,0 +1,213 @@
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+"""handoff_notify.py 的回归测试：'从未成功'宽限截止（Codex sil-codex-20260908-03 §四 C）。临时目录，不弹窗。"""
+import io, os, sys, json, shutil, tempfile, importlib.util
+from datetime import datetime, timezone, timedelta
+
+HERE = os.path.dirname(os.path.abspath(__file__))
+ROOT = tempfile.mkdtemp(prefix="hn_")
+os.environ["HANDOFF_TOOLS_DIR"] = os.path.join(ROOT, "tools")  # 状态、日志、页面全进临时目录（US3 Claude 1550 R1）
+os.environ["HN_STATE_PATH"] = os.path.join(ROOT, "notify_state.json")
+os.environ["HL_STATE_PATH"] = os.path.join(ROOT, "lessons_state.json")
+os.environ["HN_LOG_PATH"] = os.path.join(ROOT, "log.txt")
+os.environ["HANDOFF_NO_REGISTER"] = "1"  # 不碰真实注册表（AppUserModelID 与 handoff-veto: 协议），按钮逻辑照常走
+spec = importlib.util.spec_from_file_location("notify", os.path.join(os.path.dirname(HERE), "handoff_notify.py"))
+n = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(n)
+n.AUTO_PUBLISH = False  # 本测试不起 publish 子进程
+n.task_last_result = lambda name: (None, None)  # 不读真机的计划任务状态（同 HANDOFF_TOOLS_DIR 那条隔离承诺）
+
+sent = []
+n.toast = lambda title, body, buttons=None, persistent=True: (sent.append((title, body, buttons, persistent)), True)[1]
+T = os.path.join(ROOT, "协作教训.md")
+io.open(T, "w", encoding="utf-8", newline="\n").write("现役\n\n| 编号 | 状态 | 一句话规矩 | 为什么 | 出处 |\n|---|---|---|---|---|\n| LG-01 | 生效 | 规矩一 | 事一 | 源 |\n\n## 更新记录\n\n- 建档\n")
+t0 = datetime(2026, 9, 8, 12, 0, tzinfo=timezone.utc)
+results = []
+
+
+def ok(name, cond):
+    results.append((name, bool(cond)))
+    print(("  PASS " if cond else "  FAIL ") + name)
+
+
+n.check(T, now_utc=t0, task_present=True)
+st = json.load(io.open(os.environ["HN_STATE_PATH"], encoding="utf-8"))
+ok("首次发现：记 first_seen、不弹", st.get("first_seen_utc") == t0.isoformat() and not sent)
+n.check(T, now_utc=t0 + timedelta(hours=35), task_present=True)
+ok("35 小时：宽限中不弹", not sent)
+n.check(T, now_utc=t0 + timedelta(hours=37), task_present=True)
+ok("37 小时仍无成功：弹'从未成功'", len(sent) == 1 and "从未成功" in sent[0][1])
+ok("故障类 → 常驻弹窗、标题含'需要你介入'、唯一按钮「看处理」开状态页", sent[0][3] is True and "需要你介入" in sent[0][0]
+   and [b[0] for b in (sent[0][2] or [])] == ["看处理"] and sent[0][2][0][1].endswith("handoff_status.html"))
+n.check(T, now_utc=t0 + timedelta(hours=40), task_present=True)
+ok("同日不重复弹", len(sent) == 1)
+json.dump({"last_scan_utc": (t0 + timedelta(hours=41)).isoformat()}, io.open(os.environ["HL_STATE_PATH"], "w", encoding="utf-8"))
+n.check(T, now_utc=t0 + timedelta(hours=42), task_present=True)
+st = json.load(io.open(os.environ["HN_STATE_PATH"], encoding="utf-8"))
+ok("成功后：清 first_seen、不弹", "first_seen_utc" not in st and len(sent) == 1)
+n.check(T, now_utc=t0 + timedelta(hours=42 + 37), task_present=True)
+ok("上次成功后 37 小时：弹'已 N 小时没有成功'", len(sent) == 2 and "没有成功运行" in sent[1][1])
+n.check(T, now_utc=t0 + timedelta(hours=100), task_present=False)
+ok("定时任务不存在：不评估故障", len(sent) == 2)
+ok("页面与状态都在临时目录，没碰真实家目录", n.STATUS_PAGE.startswith(ROOT) and n.FINDINGS_PAGE.startswith(ROOT)
+   and os.path.exists(n.STATUS_PAGE) and not os.path.exists(os.path.join(os.path.expanduser("~"), ".claude", "tools", "logs", "handoff_status.html.tmp")))
+# --with-scan 的扫描器也覆盖索引 README（G8）：反斜杠链接被扫到，_archive 下的不扫，跨机链接不报
+WT = os.path.join(ROOT, "工作传递")
+for sub, text in (("子任务/claude-code", "# 索引\n\n[坏](claude-code\\2026-09-09_x_交接报告.md) [远](/root/x.md) [上](../没有.md)\n"),
+                  ("_archive/旧/claude-code", "# 旧\n\n[坏](claude-code\\x_交接报告.md)\n"),
+                  ("子任务/codex", "# 好\n\n[上](../README.md)\n")):
+    os.makedirs(os.path.join(WT, sub))
+    io.open(os.path.join(WT, sub, "README.md"), "w", encoding="utf-8", newline="\n").write(text)
+found = n.scan_problems(WT, 24)
+ok("看门狗扫描覆盖索引 README：只报反斜杠那份（G8），_archive 与跨机链接不报", len(found) == 1 and found[0][0].endswith(os.path.join("claude-code", "README.md"))
+   and "_archive" not in found[0][0] and all(x.startswith("G8") for x in found[0][2]) and "/root/x.md" not in " ".join(found[0][2]))
+# 旧实现总 cap=20 且先扫报告，20 个坏报告会让索引循环直接退出；生产默认必须完整收集，不能让 G8 饥饿。
+for i in range(20):
+    p = os.path.join(WT, "拥堵", f"{i:02d}_交接报告.md")
+    os.makedirs(os.path.dirname(p), exist_ok=True)
+    io.open(p, "w", encoding="utf-8", newline="\n").write("不是 frontmatter\n")
+found = n.scan_problems(WT, 24)
+ok("20 个坏报告不会饿死 G8 索引：生产默认完整返回 21 项", len(found) == 21 and sum(1 for p, _, _ in found if p.endswith("README.md")) == 1)
+
+# v1.4：扫描只滤 G6 跨机断链，G6P 反斜杠不可移植照进清单（GLM 09-09 二轮）
+pbs = os.path.join(WT, "反斜杠件", "claude-code", "2026-09-09_0003_x_交接报告.md")
+os.makedirs(os.path.dirname(pbs), exist_ok=True)
+io.open(pbs, "w", encoding="utf-8", newline="\n").write("---\nstatus: draft\nreport_id: x-3\n---\n\n[断](没有.md)\n[反](claude-code\\2026-09-09_0003_x_交接报告.md)\n")
+found = n.scan_problems(WT, 24)
+mine = [f for f in found if f[0] == pbs]
+ok("scan_problems：G6P 反斜杠项保留、G6 断链项滤掉", len(mine) == 1 and any(x.startswith("G6P") for x in mine[0][2]) and not any(x.startswith("G6 ") for x in mine[0][2]))
+
+# v2.4：待否决到期前 6 小时升为"需要你介入"并常驻（GLM 09-09）
+due_soon = (t0 + timedelta(hours=100 + 3)).astimezone(n.BJ).strftime("%Y-%m-%d %H:%M")
+io.open(T, "w", encoding="utf-8", newline="\n").write(
+    "现役\n\n| 编号 | 状态 | 一句话规矩 | 为什么 | 出处 |\n|---|---|---|---|---|\n| LG-01 | 生效 | 规矩一 | 事一 | 源 |\n"
+    f"| LG-02 | 拟生效（至 {due_soon}） | 规矩二 | 事二 | 源；加入 2026-09-07 00:00（自动） |\n\n## 更新记录\n\n- 建档\n")
+sent.clear()
+n.check(T, now_utc=t0 + timedelta(hours=100), task_present=False)
+ok("到期前 3 小时：升级为常驻弹窗，标题只邀请去看，不逼人在弹窗上判断", len(sent) == 1 and sent[0][3] is True
+   and "你看一眼" in sent[0][0] and "明早 09:00 生效" in sent[0][1] and "你不管就是同意" in sent[0][1])
+n.check(T, now_utc=t0 + timedelta(hours=101), task_present=False)
+ok("同一到期只升级提醒一次", len(sent) == 1)
+
+# v1.5（负责人 09-10 反馈）：倒计时说人话、到期在即逐条列全并先说怎么办、升级窗 6→12 小时
+ok("human_left：32 分钟不再显示成 0 小时；天/小时/分钟各档",
+   n.human_left(timedelta(minutes=32)) == "32 分钟" and n.human_left(timedelta(seconds=30)) == "不到 1 分钟"
+   and n.human_left(timedelta(hours=5, minutes=30)) == "5 小时 30 分钟" and n.human_left(timedelta(hours=5)) == "5 小时"
+   and n.human_left(timedelta(days=2, hours=3)) == "2 天 3 小时" and n.human_left(timedelta(days=2)) == "2 天")
+ok("cut：不满长度不加省略号，超了才加", n.cut("短", 10) == "短" and n.cut("一二三四五", 3) == "一二三…")
+
+
+def with_pending(rows):
+    io.open(T, "w", encoding="utf-8", newline="\n").write(
+        "现役\n\n| 编号 | 状态 | 一句话规矩 | 为什么 | 出处 |\n|---|---|---|---|---|\n| LG-01 | 生效 | 规矩一 | 事一 | 源 |\n"
+        + "".join(rows) + "\n## 更新记录\n\n- 建档\n")
+
+
+def row(lid, due_utc, rule):
+    d = due_utc.astimezone(n.BJ).strftime("%Y-%m-%d %H:%M")
+    return f"| {lid} | 拟生效（至 {d}） | {rule} | 事 | 源；加入 2026-09-07 00:00（自动） |\n"
+
+
+due = t0 + timedelta(hours=200)
+with_pending([row("LG-03", due, "写已实测时出处要给复核方打得开的位置"), row("LG-04", due, "引用会改的文档要给版本身份")])
+sent.clear()
+n.check(T, now_utc=due - timedelta(minutes=40), task_present=False)
+title, body = sent[0][0], sent[0][1]
+ok("到期前 40 分钟：正文写「40 分钟」而不是「0 小时」", len(sent) == 1 and "40 分钟" in body and "0 小时" not in title + body)
+# 负责人 09-10：'我压根不知道 LG-06 是什么' / '要么就是跳转出去让我去看实际内容然后再给我的意见'
+ok("弹窗对人可读：不出现内部编号（LG-xx）", "LG-" not in title and "LG-" not in body)
+ok("弹窗对人可读：不出现内部黑话（否决／拟生效／每日学习／否决记录）",
+   not any(w in title + body for w in ("拟生效", "否决记录", "每日学习", "否决")))
+ok("弹窗不塞规矩正文，也不在弹窗上让人拍板——只说有这回事 + 一个「去看看」",
+   "写已实测时" not in body and "引用会改的文档" not in body
+   and [b[0] for b in (sent[0][2] or [])] == ["去看看"] and sent[0][2][0][1].endswith("handoff_status.html"))
+ok("弹窗说清了不管会怎样、去哪读全文", "你不管就是同意" in body and "读全文" in body and sent[0][3] is True)
+page = io.open(n.STATUS_PAGE, encoding="utf-8").read()
+ok("判断在页面上做：顶部「等你拍板」区给出两条规矩的全文",
+   "等你拍板" in page and "写已实测时出处要给复核方打得开的位置" in page and "引用会改的文档要给版本身份" in page)
+ok("页面每条规矩都给「同意」「不采纳」两个按钮，指向正确的编号",
+   'href="handoff-rule:ok/LG-03"' in page and 'href="handoff-rule:no/LG-03"' in page
+   and 'href="handoff-rule:ok/LG-04"' in page and 'href="handoff-rule:no/LG-04"' in page)
+ok("页面解释了这些规矩是哪来的、不做事会怎样", "自己写报告犯过的错" in page and "什么都不做＝同意" in page)
+due2 = t0 + timedelta(hours=300)
+with_pending([row("LG-05", due2, "规矩五")])
+sent.clear()
+n.check(T, now_utc=due2 - timedelta(hours=10), task_present=False)
+ok("到期前 10 小时就升级（旧的 6 小时窗配 4 小时轮询，最晚只提前几十分钟）",
+   len(sent) == 1 and sent[0][3] is True and "10 小时" in sent[0][1] and "你看一眼" in sent[0][0])
+due9 = t0 + timedelta(hours=500)
+with_pending([row("LG-09", due9, "规矩九")])
+sent.clear()
+n.check(T, now_utc=due9 + timedelta(hours=5), task_present=False)
+ok("已过期但还没翻牌：仍然常驻提醒 + 带去页面（这段最长十几小时）",
+   len(sent) == 1 and sent[0][3] is True and "已经到期" in sent[0][1]
+   and [b[0] for b in (sent[0][2] or [])] == ["去看看"])
+ok("过期文案不出现负数倒计时", "还有 -" not in sent[0][1] and "还有 -" not in sent[0][0])
+due3 = t0 + timedelta(hours=400)
+with_pending([row("LG-08", due3, "规矩八")])
+sent.clear()
+n.check(T, now_utc=due3 - timedelta(hours=20), task_present=False)
+ok("离到期还有 20 小时：只当告知、不常驻", len(sent) == 1 and sent[0][3] is False and "需要你介入" not in sent[0][0])
+
+# v1.5：一键否决（弹窗按钮真的执行的那件事）——只追加、不重复、编号必须真实存在
+VD = os.path.join(ROOT, "veto")
+os.makedirs(VD, exist_ok=True)
+VT, VV = os.path.join(VD, "协作教训.md"), os.path.join(VD, "协作教训-否决记录.md")
+io.open(VT, "w", encoding="utf-8", newline="\n").write(
+    "现役\n\n| 编号 | 状态 | 一句话规矩 | 为什么 | 出处 |\n|---|---|---|---|---|\n"
+    "| LG-01 | 生效 | 规矩一 | 事一 | 源 |\n| LG-06 | 拟生效（至 2099-01-01 00:00） | 规矩六 | 事六 | 源 |\n\n## 更新记录\n\n- 建档\n")
+io.open(VV, "w", encoding="utf-8", newline="\n").write(
+    "现役\n\n# 否决记录\n\n| 编号 | 日期 | 谁 | 理由（可空） |\n|---|---|---|---|\n\n## 更新记录\n\n- 建档\n")
+sent.clear()
+rc = n.decide("handoff-rule:no/LG-06", VT, who="负责人")
+vt = io.open(VV, encoding="utf-8").read()
+ok("不采纳：协议串里的动作与编号被正确取出，行写进否决记录表格里", rc == 0 and "| LG-06 | " in vt
+   and vt.index("| LG-06 | ") > vt.index("|---|---|---|---|") and vt.index("| LG-06 | ") < vt.index("## 更新记录"))
+ok("不采纳：更新记录也补一行，便于事后对账", "点「不采纳」划掉" in vt.split("## 更新记录")[1])
+ok("不采纳：确认弹窗说人话——先复述规矩，再说怎么反悔", len(sent) == 1 and sent[0][0] == "这条不采纳了"
+   and "规矩六" in sent[0][1] and "改主意就删掉" in sent[0][1] and sent[0][3] is False)
+sent.clear()
+rc2 = n.decide("no/LG-06", VT)
+ok("不采纳：重复点不写第二行", rc2 == 0 and io.open(VV, encoding="utf-8").read().count("| LG-06 | ") == 1 and "早就划掉了" in sent[0][0])
+sent.clear()
+rc3 = n.decide("no/LG-99", VT)
+ok("不采纳：表里没有的编号不写、明确告知", rc3 == 2 and "| LG-99 |" not in io.open(VV, encoding="utf-8").read() and "没找到" in sent[0][0])
+sent.clear()
+before = io.open(VV, encoding="utf-8").read()
+rc4 = n.decide("handoff-rule:no/../../etc/passwd", VT)
+rc5 = n.decide("no/LG-06; rm -rf /", VT)
+rc6 = n.decide("delete/LG-06", VT)
+ok("拍板：动作或编号不合法一律忽略（协议注册给全系统，只认 ok|no + LG-数字）",
+   rc4 == 2 and rc5 == 2 and rc6 == 2 and io.open(VV, encoding="utf-8").read() == before and not sent)
+# 「同意」不是"什么都不做"：记一笔，之后不再拿这条烦你
+sent.clear()
+io.open(VT, "a", encoding="utf-8", newline="\n").write("")
+rc7 = n.decide("handoff-rule:ok/LG-01", VT)
+agreed = (json.load(io.open(os.environ["HN_STATE_PATH"], encoding="utf-8")).get("agreed") or {})
+ok("同意：记进状态、弹确认、不碰任何 docs 文件", rc7 == 0 and "LG-01" in agreed
+   and sent[0][0] == "好，这条就这么定了" and "不会再提醒" in sent[0][1]
+   and io.open(VV, encoding="utf-8").read() == before)
+
+# v1.5：计划任务"跑过但结果码非 0"当场报（09-10 实况：HandoffDaily 被关窗口杀掉，脚本一行日志都没写）
+io.open(T, "w", encoding="utf-8", newline="\n").write(
+    "现役\n\n| 编号 | 状态 | 一句话规矩 | 为什么 | 出处 |\n|---|---|---|---|---|\n| LG-01 | 生效 | 规矩一 | 事一 | 源 |\n\n## 更新记录\n\n- 建档\n")
+n.task_last_result = lambda name: ((3221225786, "2026-09-10 01:40:22") if name == "HandoffDaily" else (None, None))  # PowerShell 报的是无符号
+sent.clear()
+n.check(T, now_utc=t0 + timedelta(hours=600), task_present=True)
+ok("计划任务上次结果码非 0：当场报，并点破是窗口被关掉杀的",
+   len(sent) == 1 and sent[0][3] is True and "HandoffDaily" in sent[0][1] and "0xC000013A" in sent[0][1])
+n.check(T, now_utc=t0 + timedelta(hours=601), task_present=True)
+ok("同一次失败只报一次", len(sent) == 1)
+n.task_last_result = lambda name: (0, "2026-09-10 09:00:00")
+sent.clear()
+n.check(T, now_utc=t0 + timedelta(hours=602), task_present=True)
+ok("结果码 0：不报", not sent)
+n.task_last_result = lambda name: (267011, "N/A")
+n.check(T, now_utc=t0 + timedelta(hours=603), task_present=True)
+ok("267011（从没跑过）不当失败", not sent)
+n.task_last_result = lambda name: (None, None)
+
+n_fail = sum(1 for _, c in results if not c)
+print(f"\n合计 {len(results)} 项，失败 {n_fail} 项")
+shutil.rmtree(ROOT, ignore_errors=True)
+sys.exit(1 if n_fail else 0)

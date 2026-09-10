@@ -1,0 +1,26 @@
+name: tests
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  test:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+        python: ["3.10", "3.12"]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python }}
+      - run: pip install pyyaml
+      - name: write-time checker
+        run: python -X utf8 规范/交接写时门/tests/test_gate.py
+      - name: daily learning (fake model, no network)
+        run: python -X utf8 规范/交接写时门/tests/test_lessons.py
+      - name: watchdog (no popups, no registry)
+        run: python -X utf8 规范/交接写时门/tests/test_notify.py

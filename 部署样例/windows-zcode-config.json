@@ -1,0 +1,19 @@
+{
+  "hooks": {
+    "enabled": true,
+    "events": {
+      "PostToolUse": [
+        {
+          "hooks": [
+            {
+              "type": "command",
+              "command": "\"<PYTHON>\" -X utf8 \"<DOCS>/规范/交接写时门/handoff_gate.py\" --hook-strict --root \"<DOCS>/工作传递\"",
+              "timeoutMs": 20000,
+              "statusMessage": "交接报告写后检查"
+            }
+          ]
+        }
+      ]
+    }
+  }
+}
