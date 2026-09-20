@@ -2,7 +2,12 @@
 # -*- coding: utf-8 -*-
 """
 handoff_notify.py —— 桌面通知与看门狗（Windows 常驻弹窗；Linux 只记日志，如实写"未送达"）
-v1.5 · 2026-09-10 · 按负责人反馈改弹窗与静默：倒计时说人话（不再出现"还有 0 小时"）· 到期在即时逐条列全并先说怎么办
+v1.7 · 2026-09-20 · 新增 --with-flow：每 4 小时顺跑 handoff_flow.py（工作传递三层规范的机检，report-only），
+    清单落 工作传递/规范扫描-待处理.md 进"系统自己在做"区；发现比上轮**变多**才给负责人一条当日提醒（负责人令"要盯着指出"）。
+（v1.6 · 2026-09-20 · 被拒候选池上处理页（负责人 09-19/09-20：好候选被拒后只沉日志＝没学）：新增「被拒的好点子」区，
+    每条给「采纳/不用」按钮；采纳＝写成人工行进表（拟生效 48h，出处注明原拒因），不用＝翻篇。协议注册条件从
+    "有拟生效规矩"扩为"有拟生效规矩或有待裁量候选"。弹窗契约不变：池子本身不触发弹窗，只在页面上出现。
+（v1.5 · 2026-09-10 · 按负责人反馈改弹窗与静默：倒计时说人话（不再出现"还有 0 小时"）· 到期在即时逐条列全并先说怎么办
     · 升级窗 6→12 小时（看门狗 4 小时一轮，6 小时窗最晚只提前几十分钟）· 所有子进程不再闪控制台窗口
     · 容忍 stdout 为 None（计划任务改用 pythonw.exe）· 弹窗署名从 Windows PowerShell 换成自己的应用名
     · 弹窗上给出真的介入手段：「否决 LG-xx」按钮一点就写进否决记录（自定义协议 handoff-veto:）
@@ -16,7 +21,7 @@ v1.5 · 2026-09-10 · 按负责人反馈改弹窗与静默：倒计时说人话�
           no → 追加一行到同目录的否决记录（只追加、不改已有行、重复点不重复写）
           ok → 记在看门狗状态里，以后不再拿这条提醒（不动任何 docs 文件）
         **只由人点按钮或手敲触发**，自动流程一行都不碰否决记录；编号必须在表里真实存在
-  check <协作教训.md> [--with-scan <docs/工作传递>] [--scan-hours 8]
+  check <协作教训.md> [--with-scan <docs/工作传递>] [--scan-hours 8] [--with-flow <docs 根>] [--flow-days 2]
         看门狗：独立于每日学习任务运行，判断该不该提醒，去重后弹窗并写日志
         另查一件事：**计划任务上次运行的结果码**（走 PowerShell 的 Get-ScheduledTaskInfo，不用 schtasks /V——
         带 CREATE_NO_WINDOW 时它不输出那几行）。非 0 就当场报：脚本被杀时连一行日志都写不出，
@@ -42,7 +47,9 @@ TOOLS = os.environ.get("HANDOFF_TOOLS_DIR") or os.path.join(os.path.expanduser("
 AUTO_PUBLISH = True  # 生效版凭证与表不一致时自动重跑 publish（同机同锁，不违反单发布者）；测试关掉
 OWNER = os.environ.get("HANDOFF_OWNER") or "负责人"  # 状态页里示例否决行的"谁"列；分发出去的脚本不带人名
 TODO_WRITER = "Windows 看门狗 HandoffNotify（每 4 小时；本机专属，US3 有自己的 写后检查-待处理-US3.md）"
+FLOW_WRITER = "Windows 看门狗 HandoffNotify（每 4 小时；本机专属，US3 有自己的 规范扫描-待处理-US3.md）"
 STATE_PATH = os.environ.get("HN_STATE_PATH") or os.path.join(TOOLS, "handoff_notify_state.json")
+POOL_PATH = os.environ.get("HL_POOL_PATH") or os.path.join(TOOLS, "handoff_rejected_pool.json")  # 被拒候选池（v1.6，lessons 写、这里读/裁量）
 LESSONS_STATE = os.environ.get("HL_STATE_PATH") or os.path.join(TOOLS, "handoff_lessons_state.json")
 LOG_PATH = os.environ.get("HN_LOG_PATH") or os.path.join(TOOLS, "logs", "handoff_notify.log")
 TASK_NAMES = ("HandoffDaily", "HandoffLessons")
@@ -172,20 +179,80 @@ def ensure_protocol(table_path):
 
 
 def decide(arg, table_path, who=None):
-    """负责人对一条规矩拍板。只有人点页面上的按钮（或手敲这条命令）才会走到这里，自动流程不碰。
-    arg 形如 `ok/LG-06`、`no/LG-06`，或协议串 `handoff-rule:no/LG-06`。
-      no = 不采纳 → 往否决记录追加一行（只追加、不改已有行、重复点不重复写）
-      ok = 同意   → 记在看门狗状态里，以后不再拿这条提醒你（不动表、不动任何 docs 文件）
-    编号必须在表里真实存在；动作与编号都不合法就什么都不做。"""
+    """负责人对一条规矩/候选拍板。只有人点页面上的按钮（或手敲这条命令）才会走到这里，自动流程不碰。
+    arg 形如 `ok/LG-06`、`no/LG-06`、`adopt/RP-003`、`drop/RP-003`，或协议串 `handoff-rule:no/LG-06`。
+      no    = 不采纳 → 往否决记录追加一行（只追加、不改已有行、重复点不重复写）
+      ok    = 同意   → 记在看门狗状态里，以后不再拿这条提醒你（不动表、不动任何 docs 文件）
+      adopt = 采纳被拒候选（v1.6）→ 写成人工行进表（拟生效 48h、出处注明程序当时的拒因），池里标记 adopted
+      drop  = 候选翻篇 → 池里标记 ignored，页面不再列
+    LG 编号必须在表里真实存在、RP 编号必须在池里且待裁量；动作与编号都不合法就什么都不做。"""
     raw = urllib.parse.unquote((arg or "").strip().strip('"'))
     if raw.lower().startswith(RULE_SCHEME + ":"):
         raw = raw[len(RULE_SCHEME) + 1:]
     raw = raw.strip().strip("/")
     act, _, lid = raw.partition("/")
     act, lid = act.strip().lower(), lid.strip()
-    if act not in ("ok", "no") or not re.fullmatch(r"LG-\d{2,4}", lid):
+    if act not in ("ok", "no", "adopt", "drop") or not re.fullmatch(r"(LG|RP)-\d{2,4}", lid):
         log(f"拍板：参数不合法，忽略（{raw[:60]!r}）")
         return 2
+    now = datetime.now(BJ)
+    if act in ("adopt", "drop"):
+        pool = load_json(POOL_PATH, {}) or {}
+        ent = next((x for x in pool.get("items", [])
+                    if str(x.get("id", "")) == lid and str(x.get("status", "pending")) == "pending"), None)
+        if not ent:
+            log(f"拍板：池里没有待裁量的 {lid}，忽略")
+            toast("没找到这条候选", f"被拒候选里没有编号 {lid} 的待裁量的条目，什么都没有改。", [], persistent=False)
+            return 2
+        if act == "drop":
+            ent["status"], ent["decided"] = "ignored", f"{now:%Y-%m-%d %H:%M}"
+            save_json(POOL_PATH, pool)
+            log(f"拍板：{lid} 不用，已翻篇")
+            toast("好，这条就翻篇了", f"「{cut(str(ent.get('rule', '')), 46)}」\n以后不再列在候选里。", [], persistent=False)
+            return 0
+        # adopt：写成人工行（拟生效 48h；人工行不受 60 字自动上限约束，同 LG-06/07 先例）
+        try:
+            text = io.open(table_path, encoding="utf-8").read()
+        except OSError as e:
+            log(f"拍板：读不到教训表 {table_path}：{e}")
+            return 2
+        rows_no = [int(m.group(1)) for m in (re.match(r"\| LG-(\d+)", ln) for ln in text.split("\n")) if m]
+        nid = (max(rows_no) or 0) + 1
+        due = now + timedelta(hours=48)
+        refs = "；".join(f"[{e.get('report_id')}]({e.get('rel')})" for e in (ent.get("evidence") or [])[:3]) \
+               or "（本条由负责人从被拒候选采纳，无核验过的引文）"
+        why_full = (f"{ent.get('why', '')}（类别：{ent.get('category', '其他')}；负责人从被拒候选采纳，"
+                    f"程序当时没让它自动生效的原因：{ent.get('reason', '')}）").replace("\n", " ")
+        new_row = f"| LG-{nid:02d} | 拟生效（至 {due:%Y-%m-%d %H:%M}） | {str(ent.get('rule', '')).replace('|', '／')} | {why_full.replace('|', '／')} | {refs}；加入 {now:%Y-%m-%d %H:%M}（人工） |"
+        lines = text.split("\n")
+        idx = max((i for i, ln in enumerate(lines) if ln.startswith("| LG-")), default=None)
+        if idx is None:
+            i2 = next((j for j, ln in enumerate(lines) if ln.replace(" ", "").startswith("|---")), None)
+            if i2 is None:
+                log(f"拍板：表里找不到表格，没法加行（{table_path}）")
+                toast("教训表里没找到表格", "这条候选没能写成规矩：表里找不到可以加行的位置，请手动加。", [], persistent=False)
+                return 2
+            lines.insert(i2 + 1, new_row)
+        else:
+            lines.insert(idx + 1, new_row)
+        for j in range(len(lines) - 1, -1, -1):  # 更新记录追加一行，便于事后对账
+            if lines[j].strip().startswith("- "):
+                lines.insert(j + 1, f"- {now:%Y-%m-%d %H:%M}：{lid} 经负责人在处理页点「采纳」，写成人工行 LG-{nid:02d}。（handoff_notify.py rule adopt/…）")
+                break
+        try:
+            tmp = table_path + ".tmp"
+            io.open(tmp, "w", encoding="utf-8", newline="\n").write("\n".join(lines))
+            os.replace(tmp, table_path)
+        except OSError as e:
+            log(f"拍板：写不进教训表 {table_path}：{e}")
+            toast("采纳没写成", f"没能把这条候选写进教训表：{e}。请手动加一行。", [], persistent=False)
+            return 2
+        ent["status"], ent["decided"], ent["row"] = "adopted", f"{now:%Y-%m-%d %H:%M}", f"LG-{nid:02d}"
+        save_json(POOL_PATH, pool)
+        log(f"拍板：{lid} 已采纳为 {ent['row']}（人工行，48h 后生效）")
+        toast("已采纳成新规矩", f"「{cut(str(ent.get('rule', '')), 46)}」\n按人工规矩进了表，48 小时后生效；"
+              f"期间反悔可以在否决记录里划掉它。", [], persistent=False)
+        return 0
     try:
         text = io.open(table_path, encoding="utf-8").read()
     except OSError as e:
@@ -377,10 +444,11 @@ CSS = ('<style>body{font:15px/1.7 system-ui,"Microsoft YaHei",sans-serif;max-wid
        '.btn.ok{border-color:#282;color:#282;background:#f2fbf2}.btn.no{border-color:#c33;color:#c33;background:#fff6f6}</style>')
 
 
-def write_status_page(now, table_path, handling, decide_rules=(), decide_scheme=None):
+def write_status_page(now, table_path, handling, decide_rules=(), decide_scheme=None, pool_items=()):
     """短页：只回答"要不要你、要你做什么、去哪做"。弹窗唯一按钮「看处理」开这页；细节从这页链过去。
     handling: [(事项, 系统做了什么, 需要负责人?, (链接文字, 链接URI) 或 None)]
-    decide_rules: [(编号, 规矩全文, 到期, 为什么, 出处)]——顶部「等你拍板」区，人在这里读全文并按按钮拍板"""
+    decide_rules: [(编号, 规矩全文, 到期, 为什么, 出处)]——顶部「等你拍板」区，人在这里读全文并按按钮拍板
+    pool_items: 被拒候选池里待裁量的条目（v1.6）——「被拒的好点子」区，采纳/不用"""
     e = html.escape
     d = os.path.dirname(os.path.abspath(table_path))
     veto = os.path.join(d, "协作教训-否决记录.md")
@@ -408,6 +476,24 @@ def write_status_page(now, table_path, handling, decide_rules=(), decide_scheme=
                      + (f'<div class="why"><b>为什么会有这条：</b>{e(why)}</div>' if why else '')
                      + f'<div class="p">生效时间 {e(due)}{done}　·　谁提的：{e(src) or "—"}　·　编号 {e(lid)}</div>'
                      + f'<div>{acts}</div></div>')
+    if pool_items:
+        p.append(f'<h2>被拒的好点子：{len(pool_items)} 条（你觉得好就采纳）</h2>')
+        p.append('<div class="tip">每天早上的自动学习会从 AI 互相挑错的报告里总结新规矩。下面这些看着像样，'
+                 '但程序当时没敢让它们自动生效（原因写在每条里，比如证据不够、字数超了、类别不合）。'
+                 '你觉得有道理就点「采纳」——按人工规矩进表，48 小时后生效；不想要就点「不用」，或者不管它'
+                 '（池子只保留最近 20 条，旧的自己挤掉）。</div>')
+        for ent in pool_items:
+            evs = ent.get("evidence") or []
+            links = " ".join(f'<a class="btn" href="{file_uri(os.path.join(d, str(ev.get("rel", ""))))}">{e(str(ev.get("report_id", "?")))}</a>'
+                             for ev in evs[:3] if ev.get("rel"))
+            acts = (f'<a class="btn ok" href="{decide_scheme}:adopt/{ent.get("id", "")}">采纳</a>'
+                    f'<a class="btn no" href="{decide_scheme}:drop/{ent.get("id", "")}">不用</a>') if decide_scheme else ''
+            p.append(f'<div class="item need"><div style="font-size:1.05em"><b>{e(str(ent.get("rule", "")))}</b></div>'
+                     + (f'<div class="why"><b>为什么：</b>{e(str(ent.get("why", "")))}</div>' if ent.get("why") else '')
+                     + f'<div class="p">程序没让它自动生效的原因：{e(str(ent.get("reason", "")))}　·　'
+                       f'类别 {e(str(ent.get("category", "")))}　·　{e(str(ent.get("date", "")))}</div>'
+                     + (f'<div class="p">证据：{links}</div>' if links else '')
+                     + (f'<div>{acts}</div>' if acts else '') + '</div>')
     if need:
         p.append(f'<h2>需要你介入：{len(need)} 项</h2>')
         for ev, act, _, link in need:
@@ -563,7 +649,7 @@ def stale_message(st, now_utc, task_present):
     return None, f"每日学习尚未首跑，宽限中（已等 {int(waited)} 小时／{STALE_HOURS}）"
 
 
-def check(table_path, now_utc=None, task_present=None, scan_root=None, scan_hours=8.0):
+def check(table_path, now_utc=None, task_present=None, scan_root=None, scan_hours=8.0, flow_root=None, flow_days=2):
     st = load_json(STATE_PATH, {"notified": {}, "attempts": {}})
     notified, attempts = st.setdefault("notified", {}), st.setdefault("attempts", {})
     now_utc = now_utc or datetime.now(timezone.utc)
@@ -675,6 +761,37 @@ def check(table_path, now_utc=None, task_present=None, scan_root=None, scan_hour
         except Exception as e:
             log(f"写后检查扫描失败（不影响其他提醒）：{type(e).__name__}: {str(e)[:120]}")
 
+    # 规范扫描（v1.7 --with-flow）：跑 handoff_flow.py（report-only），清单落 工作传递/规范扫描-待处理.md。
+    # 路由同写后检查：清单是"写报告的 AI"看的；只有发现**在变多**时才给负责人一条当日提醒（负责人 09-20：要盯着指出）。
+    flow_note = None
+    if flow_root:
+        try:
+            ftodo = os.path.join(os.path.abspath(flow_root), "工作传递", "规范扫描-待处理.md")
+            r = subprocess.run([sys.executable, "-X", "utf8", os.path.join(HERE, "handoff_flow.py"), "scan", flow_root,
+                                "--days", str(int(flow_days)), "--todo", ftodo, "--writer", FLOW_WRITER],
+                               capture_output=True, text=True, encoding="utf-8", errors="replace",
+                               timeout=180, creationflags=NO_WINDOW)
+            out = (r.stdout or "") + (r.stderr or "")
+            m = re.search(r"共 (\d+) 条", out)
+            n = int(m.group(1)) if m else (0 if "无发现" in out else -1)
+            breakdown = {k: out.count(f"- **{k}**") for k in ("W1", "W2", "W3")}
+            fp = hashlib.sha256(out.encode("utf-8", "replace")).hexdigest()[:16]
+            prev = st.get("flow") or {}
+            if n >= 0:
+                flow_note = (f"规范扫描：{n} 条" + (f"（{'、'.join(f'{k}×{v}' for k, v in breakdown.items() if v)}）"
+                                                    if any(breakdown.values()) else ""),
+                             "机器只提醒不拦人：清单在 工作传递/规范扫描-待处理.md，各来源开工先看自己被点名的条目",
+                             False, ("看规范扫描清单", file_uri(ftodo)))
+                if n > 0 and prev and fp != prev.get("fp") and n > int(prev.get("n") or 0):  # 首轮只记基线不弹
+                    key = f"flowgrow:{today}"
+                    if key not in notified:
+                        msgs.append((key, f"工作传递规范扫描发现 {n} 条（比上轮多）——比如报告碎片化、回流路径写坏，"
+                                          f"清单在 工作传递/规范扫描-待处理.md，点名了具体来源。", True))
+                st["flow"] = {"fp": fp, "n": n, "at": f"{now:%Y-%m-%d %H:%M}"}
+            log(f"规范扫描：{n} 条，指纹 {fp}（上轮 {prev.get('n', '?')} 条）；清单 {ftodo if n >= 0 else '未写出'}")
+        except Exception as e:
+            log(f"规范扫描失败（不影响其他提醒）：{type(e).__name__}: {str(e)[:120]}")
+
     # 生效版凭证自检：版本行嵌的表哈希必须等于表现在的 sha256 前 8 位；不等＝表在 publish 后被改了（US3 Claude 1550 R2）
     pub_note = ensure_published(table_path)
     if pub_note:
@@ -697,6 +814,8 @@ def check(table_path, now_utc=None, task_present=None, scan_root=None, scan_hour
         handling.append(("脚本自动处理", one[:90], False, None))
     if scan_found:
         handling.append((f"{len(scan_found)} 份报告没过写后检查", "已写进待处理清单，由写它们的窗口自查；已冻结的不回改", False, ("看待处理清单", todo_uri)))
+    if flow_note:
+        handling.append(flow_note)
     for key, t, nd in msgs:
         if nd:
             if key.startswith("esc:"):
@@ -710,9 +829,13 @@ def check(table_path, now_utc=None, task_present=None, scan_root=None, scan_hour
             else:
                 handling.append((t[:40], t, True, None))
     page = write_findings_page(now, table_path, pending, auto_lines, stale, scan_found, scan_hours)
-    # 拍板按钮的协议：有待定规矩时才注册（页面与弹窗共用同一个）
-    scheme = ensure_protocol(table_path) if pending else None
-    status = write_status_page(now, table_path, handling, decide_rules=pending, decide_scheme=scheme)
+    # 被拒候选池（v1.6）：只列待裁量的，最多 20 条（池本身不触发弹窗，只在页面上出现）
+    pool_items = [x for x in ((load_json(POOL_PATH, {}) or {}).get("items") or [])
+                  if str(x.get("status", "pending")) == "pending"][-20:]
+    # 拍板按钮的协议：有待定规矩或有待裁量候选时注册（页面与弹窗共用同一个）
+    scheme = ensure_protocol(table_path) if (pending or pool_items) else None
+    status = write_status_page(now, table_path, handling, decide_rules=pending, decide_scheme=scheme,
+                               pool_items=pool_items)
     if status:
         log(f"处理状态页：{status}（弹窗「看处理」打开这一页；按钮被系统拦住时手动打开它）")
     if not msgs:
@@ -787,7 +910,8 @@ def main(a):
         return decide(arg, tbl, who=opt("--who", None))
     if len(a) >= 2 and a[0] == "check":
         opt = lambda k, d: a[a.index(k) + 1] if k in a and len(a) > a.index(k) + 1 else d
-        return check(a[1], scan_root=opt("--with-scan", None), scan_hours=float(opt("--scan-hours", 8)))
+        return check(a[1], scan_root=opt("--with-scan", None), scan_hours=float(opt("--scan-hours", 8)),
+                     flow_root=opt("--with-flow", None), flow_days=float(opt("--flow-days", 2)))
     print(__doc__)
     return 2
 

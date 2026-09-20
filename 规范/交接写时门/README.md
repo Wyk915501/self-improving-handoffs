@@ -16,6 +16,7 @@
 
 - [handoff_gate.py](handoff_gate.py)：写后检查（PostToolUse hook 与 CLI）
 - [handoff_lessons.py](handoff_lessons.py) + [handoff_lessons_prompt.md](handoff_lessons_prompt.md)：每日学习（`daily` = `collect` 收候选 → `promote` 到期转生效／否决同步 → `publish` 生成生效版，串行加锁）
+- [handoff_flow.py](handoff_flow.py)：工作传递「何时写、何时改」规范的机检（**v0.1 试运行，report-only**，09-20）：W1 只改没写／W2 只写没回流（含回流路径写坏的存量）／W3 碎片化；`scan <docs根> --todo 工作传递/规范扫描-待处理.md`；零模型；测试 [tests/test_flow.py](tests/test_flow.py) 8 项
 - [handoff_notify.py](handoff_notify.py) + [handoff_toast.ps1](handoff_toast.ps1)：桌面常驻弹窗与看门狗
 - [usage_report.py](usage_report.py)：效率追踪 · 测量层原型（只读会话记录、只出计数）
 - [tests/](tests/README.md)：三份正确行为回归测试（53 + 35 + 39 项），改脚本后必跑；状态文件全走 `HANDOFF_TOOLS_DIR` 临时目录，不碰真实家目录
@@ -24,7 +25,7 @@
 
 | 功能 | 接通 | 运转 | 有用 |
 |---|---|---|---|
-| 写后检查 | Windows Claude Code A、B 两账号用户级 hook **已装**；**ZCode 已装**（项目级 `.zcode/config.json`，`--hook-strict`）；**US3 已装**（项目级 `<项目根>/.claude/settings.json`，Codex 09-08 23:15 真会话验收，US3 Claude 23:50 复核 PASS） | Claude Code 侧本会话实测坏件→立即提示；US3 侧 hook 当场拦下了 US3 Claude 自己的预盖；ZCode 侧命令行已用 `shell=True` 模拟钩子跑通，**但未在 ZCode 里真开一次会话验证** | 09-08 抓到 8 件 `frozen_at: none`、7 件非法 YAML；返工是否减少要看后续 |
+| 写后检查 | Windows Claude Code **项目级 hook 已装**（09-19 从用户级迁入 `Desktop/Claude/.claude/settings.local.json`，原因见部署节；B 账号随封号退役）；**ZCode 已装**（项目级 `.zcode/config.json`，`--hook-strict`）；**US3 已装**（项目级 `<项目根>/.claude/settings.json`，Codex 09-08 23:15 真会话验收，US3 Claude 23:50 复核 PASS） | Claude Code 侧本会话实测坏件→立即提示；09-19 迁项目级后用全新嵌套会话复验（G1 当场回报）；US3 侧 hook 当场拦下了 US3 Claude 自己的预盖；ZCode 侧命令行已用 `shell=True` 模拟钩子跑通，**但未在 ZCode 里真开一次会话验证** | 09-08 抓到 8 件 `frozen_at: none`、7 件非法 YAML；返工是否减少要看后续 |
 | 定时兜底扫描 | 本机并进 HandoffNotify（每 4 小时，`--with-scan`，写 `写后检查-待处理.md`）；**US3 已装 cron `wyk-handoff-gate-us3`**（Codex 09-09 装，每 4 小时零模型 `--scan --todo`，写 `写后检查-待处理-US3.md`，锁与日志在 `<项目根>/.runtime/`；首个真实周期北京 18:15 通过，扫 26 件全过、退出 0）。**每台机器只写自己那份**：docs 双向同步，两端写同一路径会互相覆盖（Codex 1557 与 US3 Claude 1550 独立同结论）。09-09 起两端扫描都含 G8 索引链接检查（同一 `--scan` 入口，清单里状态标 `索引`） | 09-08 22:5x 实跑抓到 3 件；同一 (文件, 改动时刻) 只报一次 | 补住"钩子只管自己宿主"的漏洞。**限制**：清单只是近 8 小时的收件箱——超窗的条目下次生成时消失、写入端停机超 8 小时会漏，不是长期待办账（要"直到解决才消失"得另做带稳定身份的持久队列，不能靠扩窗口假装） |
 | 每日学习 | 计划任务 **HandoffDaily**（**北京 09:00 = 本机时钟 21:00**，本机是 UTC−4；账号 B；collect→promote→publish 串行加锁）已注册，09-10 起定时 | **09-09 13:32 首次真实运行成功**（手动补跑，因首版触发器误写成本机 09:00）：26 件进模型、候选 2 条、程序全部拒收（超 60 字 / 证据单件）、新增 0 行、积压 14 件；24 项离线用例 | 未知 |
 | 生效版与规则连通 | [协作教训-生效.md](../../工作传递/协作教训-生效.md) 已生成（5 条）。指针：**Windows Claude Code 已接**（`.claude/CLAUDE.md` 的 `@` 导入）、**ZCode 已接**（`~/.zcode/AGENTS.md` 第 9 节）；US3 待 Codex 在 `<项目根>/AGENTS.md` 加一行 | 生成器有测试（扣否决、扣拟生效、不含引文） | 未知；"读过版本≠遵守" |
@@ -38,7 +39,7 @@
 
 | 组件 | 本机 Windows | US3 | 为什么不同 |
 |---|---|---|---|
-| 写后检查 hook | 装（Claude Code 用户级 ×2 + ZCode 项目级） | **已装（09-08，项目级** `<项目根>/.claude/settings.json`） | US3 的 `/root/.claude/` 是全团队共用，装用户级会对每个以 root 连进去的人生效 |
+| 写后检查 hook | 装（Claude Code 项目级 + ZCode 项目级） | **已装（09-08，项目级** `<项目根>/.claude/settings.json`） | US3 的 `/root/.claude/` 是全团队共用，装用户级会对每个以 root 连进去的人生效；本机 09-19 改项目级是因为 cc-switch 整份替换用户级 settings.json 会顶掉 hook |
 | 读生效版的指针 | 装（`.claude/CLAUDE.md`、`~/.zcode/AGENTS.md`） | 装（`<项目根>/AGENTS.md` 一行） | 两边都要读到同一份规矩 |
 | 每日学习（collect／promote／publish） | 装（HandoffDaily 09:00） | **不装** | 生效版只能有一个发布者，在本机；US3 只读不写。装两份会互相覆盖 |
 | 桌面弹窗与看门狗（handoff_notify.py） | 装（HandoffNotify 每 4 小时） | **不装** | 远程服务器没有登录桌面，弹窗没人看得到；而且它是给负责人个人用的 |
@@ -73,17 +74,19 @@ python3 <项目根>/docs/规范/交接写时门/handoff_gate.py --scan <项目�
 
 ## 怎么部署写后检查
 
-**Windows 本机（已装）**：用户级 `settings.json`（A：`~/.claude/`，B：`<账号目录>/`）各一段：
+**Windows 本机（已装）**：**2026-09-19 起装在项目级** `Desktop/Claude/.claude/settings.local.json`（与工作流写时门同处），同一段配置：
 
 ```json
 "hooks": { "PostToolUse": [ { "matcher": "Write|Edit|MultiEdit", "hooks": [ {
   "type": "command",
   "command": "<HOME>/AppData/Local/Python/pythoncore-3.14-64/python.exe",
   "args": ["-X","utf8","<HOME>/Desktop/Claude/docs/规范/交接写时门/handoff_gate.py","--hook"],
-  "timeout": 20, "statusMessage": "交接报告写后检查" } ] } ] }
+  "timeout": 20, "statusMessage": "交接报告写时门" } ] } ] }
 ```
 
-用户级＝这台机器所有项目都生效。hooks 热重载，改完不用重启；`jq -e` 只证明 JSON 合法，**验收要靠一次"故意写坏件 → 收到提示"的真实 Write／Edit**。
+**为什么从用户级挪到项目级**：用户级 `settings.json` 会被 cc-switch 切模型时**整份替换**——GLM 档案里没有 hooks 键，一切 GLM 就把 hook 静默顶掉（09-18 实际发生过，09-19 查明并修复）。项目级配置 cc-switch 碰不到；检查对象（`docs/工作传递/`）本来只在这个项目里写，作用域无实际损失。同日把 cc-switch 官方档案里残留的 hooks 段删掉（防双触发）。验收记录：09-19 用全新嵌套会话写坏件，当场收到 G1 提示（[接线验证过程](../../工作传递/自我改进循环/claude-code/README.md)）。旧位置（用户级 A／B 两账号）随 B 线退役一并退场，细节见 [claude-use 文档](../../参考资料/claude-use-账号切换与US3部署.md)。
+
+hooks 热重载，改完不用重启；`jq -e` 只证明 JSON 合法，**验收要靠一次"故意写坏件 → 收到提示"的真实 Write／Edit**。
 
 **ZCode（本机 GLM 客户端，已装）**：ZCode 支持同一套钩子事件（`SessionStart / UserPromptSubmit / PreToolUse / PermissionRequest / PostToolUse / PostToolUseFailure / Stop`，也支持 `type: "command"`），但配置形状不同：多一层 `events`，且 `command` 是**单个字符串**（没有 `args` 数组）。配置在项目级 `.zcode/config.json`：
 
@@ -98,15 +101,17 @@ python3 <项目根>/docs/规范/交接写时门/handoff_gate.py --scan <项目�
 
 **US3（待负责人点头，由 Codex 执行）**：装在 **`<项目根>/.claude/settings.json`（项目级，新建）**，不碰 `/root/.claude/settings.json`（全团队共用 root），不动已有的 `settings.local.json`。配置样稿：[us3-project-hook.review.json](../../工作传递/自我改进循环/codex/2026-09-08_交接写时门复核/us3-project-hook.review.json)（`/usr/bin/python3` + 脚本绝对路径 + `--hook`）。项目级配置只在**会话从 `<项目根>` 根启动**时加载。验收＝在 `<项目根>` 下开一个 Claude 会话，故意写一份坏交接报告，收到提示。
 
-## 每日学习（handoff_lessons.py v3.3，HandoffDaily 09:00）
+## 每日学习（handoff_lessons.py v3.6，HandoffDaily 09:00）
 
 回答的问题：**Codex／US3 Claude 每天判出来的机制类问题，怎么不经人手变成下次写件要遵守的规矩。** 一个入口 `daily`，加锁串行三步，**模型全程无文件写权**：
 
-1. `collect`：程序按上次扫描位置 + 积压队列枚举 codex／US3／GLM 来源的新判决件，把正文当**不可信引文**送给 `claude -p`（sonnet，`--tools ""` 无工具，`--json-schema` 只收 JSON）；模型只返回候选。**程序**验证：每条证据的引文必须**逐字见于该判决件原文**；≥2 条证据来自不同判决件且指向 ≥2 个**不同原始事件**（`feedback_for`，缺则 `related_reports` 首项，再缺不计；**指向的原件必须在树内实存**，编造的 ID 不算）；类别在七类白名单；与现有行、已否决行、本批已接受候选都不近似；命中越界关键词（权限／部署／同步／冻结机制／检查器／git／发布／删除／移出／改名／密钥…）的不进表——**这只是自由文本之上的额外一层，换个说法就绕得过；反过来它也会误拒合法教训**（词表里曾有"目录／检查／扫描／待处理"四个宽词，把"索引与文件同目录时只写裸文件名"这种正该学的拦进观察，二轮已删；观察记录里的拒收不都是该拒的），真正的守门是逐字引文＋独立事件＋48 小时否决窗；日增 ≤2（从表本身数）、生效+拟生效 ≤15（超了 publish 只打警告，不截断）。已处理的件按 `report_id@改动时刻` 记，改过内容的件会再读一次（09-09 首跑留下的裸 `report_id` 条目不再被认，否则那 26 件改了也永久跳过；它们早于扫描位置，不会因此重扫）。通过的由程序分配编号、按真实加入时刻 +48 小时写到期、追加行。
+1. `collect`：程序按上次扫描位置 + 积压队列枚举 codex／US3／GLM 来源的新判决件，把正文当**不可信引文**送给 `claude -p`（sonnet，`--tools ""` 无工具，`--json-schema` 只收 JSON）；模型只返回候选。**程序**验证：每条证据的引文必须**逐字见于该判决件原文**；≥2 条证据来自不同判决件且指向 ≥2 个**不同原始事件**（`feedback_for`，缺则 `related_reports` 首项，再缺不计；**指向的原件必须在树内实存**，编造的 ID 不算）；类别在九类白名单（09-20 v3.6 补「正本与索引维护」「验收与状态」两类——病根①：这两类本是协作教训主场，缺类目导致好候选全灭）；与现有行、已否决行、本批已接受候选都不近似；命中越界关键词（权限／部署／同步／冻结机制／检查器／git／发布／删除／移出／改名／密钥…）的不进表——**这只是自由文本之上的额外一层，换个说法就绕得过；反过来它也会误拒合法教训**（词表里曾有"目录／检查／扫描／待处理"四个宽词，把"索引与文件同目录时只写裸文件名"这种正该学的拦进观察，二轮已删；观察记录里的拒收不都是该拒的），真正的守门是逐字引文＋独立事件＋48 小时否决窗；日增 ≤2（从表本身数）、生效+拟生效 ≤15（超了 publish 只打警告，不截断）。已处理的件按 `report_id@改动时刻` 记，改过内容的件会再读一次（09-09 首跑留下的裸 `report_id` 条目不再被认，否则那 26 件改了也永久跳过；它们早于扫描位置，不会因此重扫）。通过的由程序分配编号、按真实加入时刻 +48 小时写到期、追加行。
 2. `promote`：否决记录里点名的行——**不论拟生效还是已生效**——同步为"否决（见否决记录）"；到期且带"加入"标记、到期−加入 ≥ 48 小时的拟生效行转生效；写前重读比对、原子替换。每天跑一次，所以实际生效在 48–72 小时之间。
 3. `publish`：生成 [协作教训-生效.md](../../工作传递/协作教训-生效.md)。
 
 **程序守不住的两条**：①候选规矩是自由文本，程序无法证明它只关于"报告写法与协作"；②判决件的叙述本身不可验证——"原件实存"只验存在不验相关，一份判决件填任意真实 `report_id` 再虚构一段教训、引文取自自己正文，四道兜全过（原件须在来源目录之外，判决件互引已不算，三轮窄版）。这一层的实际效果是"编造的 ID 过不去"，不是"编造的事过不去"。负责人 09-08 已接受该残余风险（两处逐字引文 + 不同原始事件 + 48 小时否决窗 + 否决记录 + 常驻弹窗）。
+
+**被拒候选池（v3.6，09-20 病根②）**：被拒 ≠ 死路。collect 里除垃圾（字段缺失）与重复（与现有行／已否决／本批已接受近似）外的**所有**被拒候选——超字数、类别不合（含「其他」）、越界关键词、证据不足、冲突、配额——写入本机 `~/.claude/tools/handoff_rejected_pool.json`（上限 20 条待裁量，池内按 similar 去重）。看门狗处理页新增「被拒的好点子」区：每条给全文＋程序当时的拒因＋「采纳／不用」按钮（`handoff-rule:adopt|drop/RP-xxx`）；**采纳＝写成人工行进表**（拟生效 48h、出处注明原拒因，人工行不受 60 字自动上限约束，同 LG-06/07 先例），不用＝翻篇。池子本身不触发弹窗（弹窗契约不变），只在页面上出现。09-20 已把状态文件里攒的 17 条历史观察一次性回填进池。越界关键词词表**有意不动**：它拦的"直接覆盖即可"类危险货必须继续拦在自动生效之外——误伤的好规矩走池子由人裁量，两类矛盾同时解决。
 
 **尚未实现**（Codex 2230 §三.4）：规则的修订／替换／停用链路——现在只会追加和否决；满 15 条后新想法只进观察。
 
@@ -162,6 +167,11 @@ Codex 建议：运行健康／实际效果／规则健康／维护建议四项�
 不再有：sha 级证据链、三轨信号模型、exposure window、三周期试点合同、十五列收据、每拍一份 run report、提案—人审—批准流程。负责人 09-08 原话："我需要一个更自动化的，即使任务能力缩小。"
 
 ## 更新记录
+
+- 2026-09-20（第二批）：①新工具 handoff_flow.py v0.1（试运行，report-only）——工作传递三层规范（同日草案）的机检 W1/W2/W3，测试 8 项；真树基线：21 条 W2（回流路径写坏的存量：占位文字 pending_unique_writer、US3 绝对路径 /root/…、台账无更新记录）＋4 条 W3（网站线两天 65 份报告＝碎片化实锤）；输出 `工作传递/规范扫描-待处理.md`。②antd 自动检查上线（负责人令"都装并做到自动"）：CLI 全局装；`~/.claude/tools/antd_scan.py` 自动发现两根目录下真用 antd 的项目（现仅 <某前端项目>）每周日 22:17 本机跑 lint+doctor，滚动报告＋只在有新问题时弹窗；首次基线 13 处弃用 API。<工程树>/ 树无前端项目（<空占位目录> 是空目录），自动发现已预留覆盖。（claude-code）
+- 2026-09-20：lessons v3.6 + notify v1.6，病根修复（负责人 09-19/09-20 定方向：好候选被拒后只沉日志＝没学）。①类别白名单 7→9 类（补「正本与索引维护」「验收与状态」）；②被拒候选池：非垃圾非重复的被拒候选全部入池，处理页「被拒的好点子」区带「采纳/不用」按钮，采纳写成人工行；历史 17 条已回填。越界词表不动（危险货必须拦，误伤走池子）。回归 43+50+53=146 项两套新用例全过（原 127 项无一改判）。（claude-code）
+
+- 2026-09-19：本机写后检查 hook 从用户级迁到项目级 `Desktop/Claude/.claude/settings.local.json`（与工作流写时门同处）。起因：负责人指出两套 `.claude` 目录设计有问题，排查发现 09-18 cc-switch 切 GLM 时把用户级 settings.json 整份替换、GLM 档案无 hooks 键，hook 被静默顶掉——写时检查断了约一天。修复：①hook 入项目级（cc-switch 碰不到，与 US3 装法一致）；②删 cc-switch 官方档案里的 hooks 段防双触发；③嵌套新会话写坏件复验通过（G1 当场回报）。同日 B 账号线整体退役（目录/启动器/脚本 B 代码/保险箱 b/），详见 [claude-use 文档](../../参考资料/claude-use-账号切换与US3部署.md)。脚本本体未动（v2.5／v3.5／v1.5 不变）。（claude-code）
 
 - 2026-09-10 17:3x：v3.5。按负责人"烧谁的额度改到 GLM 能做到么"，把提名那一步的提供方做成开关：新增 `--provider claude|glm`（`handoff_lessons.py` 里 `call_model` 分流，GLM 走标准库 urllib 的流式请求——非流式的大 payload 会被网关判 504，与 glm-review 同一个坑；端点按订阅制／充值顺序试）。冒烟先验"它会不会逐字抄原文"（我们的验证器只卡这一条）：glm-5.3 通过。随后把 HandoffDaily 切到 `--provider glm` 并真跑一次无人值守：23 件、120387 字符、输入 67902／输出 21611 token，候选 3 条 → 程序拒 2（越界词、证据不足）、**接受 1 条（LG-08）**，并把 LG-06／LG-07 转正、生效版重出 7 条，退出码 0，Claude 账号零消耗。回归 53+35+39=127 两机全过。（claude-code）
 - 2026-09-10 16:4x：同日续。①**发现一次静默失败**：HandoffDaily 09-10 01:40 真跑过，结果码 `0xC000013A`（控制台被关掉、进程被杀）——正是当时每轮闪出来的那个终端窗口给了人关掉它的机会；脚本连开头那行日志都没写出来，看门狗的"36 小时没成功"要到次日凌晨才会报。改用 `pythonw.exe` 后这条路没了，同时给看门狗补上**直接读计划任务上次结果码**（走 PowerShell `Get-ScheduledTaskInfo`；`schtasks /V` 在带 `CREATE_NO_WINDOW` 时不输出那几行，实测 1691→1505 字节），非 0 当场报。②**每次调模型记账**：模型名、账号目录、输入／缓存创建／缓存读／输出四类 token、花费、轮数、耗时全写进每日学习日志，"烧谁的 token"从此有据可查。③处理页去重：同两条规矩原先在「等你拍板」「需要你介入」「系统自己在做的」里各出现一次，后两处删掉；已确认同意的不再计入"等你拍板 N 条"。回归 53+30+39=122 两机全过。（claude-code）

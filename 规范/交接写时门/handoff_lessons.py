@@ -2,7 +2,12 @@
 # -*- coding: utf-8 -*-
 """
 handoff_lessons.py —— 协作教训表的无人值守维护
-v3.5 · 2026-09-10 · 提名用的模型可切换：--provider glm 走智谱订阅额度，不再烧 Claude 账号（负责人 09-10 要求）
+v3.6 · 2026-09-20 · 病根修复（负责人 09-19/09-20：好候选被拒后只沉日志，等于没学）：①类别白名单补
+    「正本与索引维护」「验收与状态」两类（正本/索引维护习惯与验收口径本就是协作教训主场，缺类目导致好候选全灭）；
+    ②新增「被拒候选池」——除垃圾与重复外的被拒候选（超字数/类别不合/越界关键词/证据不足/冲突/配额）全部入池
+    （~/.claude/tools/handoff_rejected_pool.json，上限 20 条待裁量），处理页上负责人可一键采纳成人工行或翻篇。
+    越界关键词词表不动：它拦的"直接覆盖即可"类危险货必须继续拦在自动生效之外，改走池子由人裁量。
+（v3.5 · 2026-09-10 · 提名用的模型可切换：--provider glm 走智谱订阅额度，不再烧 Claude 账号（负责人 09-10 要求）
 （v3.4 · 同日 计划任务改用 pythonw.exe（不再闪控制台）：容忍 stdout 为 None · 调 claude CLI 时不弹控制台窗口
     · 每次调模型都记账（模型名、账号目录、四类 token、花费、轮数、耗时）——负责人要能回答"烧谁的 token"
 （v3.3 · 09-09 按 GLM 二轮复核：publish 超 15 条不再截断只警告 · 去掉 bare report_id 兼容子句（旧条目不再永久跳过）
@@ -54,11 +59,14 @@ NO_WINDOW = 0x08000000 if _platform.system() == "Windows" else 0
 TOOLS = os.environ.get("HANDOFF_TOOLS_DIR") or os.path.join(os.path.expanduser("~"), ".claude", "tools")  # 测试指到临时目录
 STATE_PATH = os.environ.get("HL_STATE_PATH") or os.path.join(TOOLS, "handoff_lessons_state.json")
 LOCK_PATH = os.environ.get("HL_LOCK_PATH") or os.path.join(TOOLS, "handoff_lessons.lock")
+POOL_PATH = os.environ.get("HL_POOL_PATH") or os.path.join(TOOLS, "handoff_rejected_pool.json")  # 被拒候选池（v3.6）
+POOL_CAP = 20  # 待裁量上限：超了挤掉最老的待裁量项（adopted/ignored 的留作记录，总量另限 60）
 PROMPT_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "handoff_lessons_prompt.md")
 VETO_NAME = "协作教训-否决记录.md"
 PUBLISH_NAME = "协作教训-生效.md"
 SOURCES = ("codex", "claude-code-US3-claude", "Zcode-glm", "claude-code-glm")
-CATEGORIES = ("格式与字段", "出处可达", "时间戳", "并发写入", "引用身份", "阻塞归属", "人话可读")
+CATEGORIES = ("格式与字段", "出处可达", "时间戳", "并发写入", "引用身份", "阻塞归属", "人话可读",
+              "正本与索引维护", "验收与状态")  # 后两类 v3.6 补（病根①）：正本/索引维护与验收口径本就是协作教训主场
 # 额外一层，不是语义边界：关键词改写就能绕（GLM 09-09 构造过"先把不合格件移出 工作传递 目录"这种整条通过的例子）。
 # 它只降低概率；真正的兜是逐字引文 + 不同原始事件 + 判决件实存核验 + 48h 否决窗。词表按 GLM 建议补齐。
 OUT_OF_SCOPE = re.compile(r"(权限|部署|同步|安装|scheduler|定时任务|计划任务|cron|deploy|sync|否决|冻结机制|检查器|"
@@ -184,6 +192,22 @@ def bigrams(s):
     return {s[i:i + 2] for i in range(len(s) - 1)}
 
 
+def load_pool():
+    try:
+        return json.load(io.open(POOL_PATH, encoding="utf-8")) or {}
+    except Exception:
+        return {"items": []}
+
+
+def save_pool(pool):
+    """被拒候选池原子写。池是本机裁量界面（看门狗/处理页读），不进 docs 同步。"""
+    os.makedirs(os.path.dirname(POOL_PATH), exist_ok=True)  # 全新环境（测试/新机）时 tools 目录可能还不存在
+    tmp = POOL_PATH + ".tmp"
+    io.open(tmp, "w", encoding="utf-8", newline="\n").write(
+        json.dumps(pool, ensure_ascii=False, indent=1))
+    os.replace(tmp, POOL_PATH)
+
+
 def similar(a, b):
     A, B = bigrams(a), bigrams(b)
     return len(A & B) / max(1, len(A | B))
@@ -301,7 +325,7 @@ def publish(path, _retry=False):
            f"版本：{ver}。只含状态「生效」且不在否决记录里的规矩；拟生效、否决、引文、观察记录一律不在此。"
            "要改请改 协作教训.md 或在 协作教训-否决记录.md 加一行，下次运行会重新生成。适用范围：写交接报告与多 AI 协作。",
            "",
-           "开工先看**你这台机器**的待处理清单（本机：写后检查-待处理.md；US3：写后检查-待处理-US3.md；各由本机的定时扫描写，两份不互通）：里面按来源目录列出近几小时没过写后检查的报告和原因，处理自己来源目录下的条目（draft 就地改；已冻结的不回改内容，纯格式修补待负责人定规则）。",
+           "开工先看**你这台机器**的两份待处理清单（本机：写后检查-待处理.md 与 规范扫描-待处理.md；US3：各带 `-US3` 后缀；各由本机的定时扫描写，两机不互通）：写后检查按来源目录列没过检查的报告和原因（draft 就地改；已冻结的不回改内容，纯格式修补待负责人定规则）；规范扫描列三层规范（何时写/何时改/防碎片化，规则见 工作传递/README.md）的违规提醒——被点名的来源自查，是提醒不是定罪。",
            ""]
     out += [f"- {c[0]}：{c[2]}" for c in live]
     out.append("")
@@ -574,7 +598,7 @@ def collect(path, docs_root, dry, since_hours, model, config_dir=None):
     print(f"模型返回候选 {len(cands)} 条")
 
     ids = {r["report_id"]: r for r in batch}
-    accepted, observations = [], []
+    accepted, observations, poolable = [], [], []
     for c in cands:
         rule = re.sub(r"\s+", " ", str(c.get("rule", ""))).strip().replace("|", "／")
         why = re.sub(r"\s+", " ", str(c.get("why", ""))).strip().replace("|", "／")
@@ -623,10 +647,43 @@ def collect(path, docs_root, dry, since_hours, model, config_dir=None):
         if reason:
             observations.append({"date": today, "rule": rule[:120], "category": cat, "reason": reason,
                                  "evidence": [e.get("report_id") for e in (c.get("evidence") or []) if isinstance(e, dict)]})
+            # v3.6 病根②：被拒 ≠ 死路。垃圾（字段缺失）与重复（近似已覆盖/已否决/本批已接受）不进池，
+            # 其余被拒候选（超字数/类别不合/越界/证据不足/冲突/配额）入池，等负责人在处理页裁量。
+            if reason != "字段缺失" and not reason.startswith(("与现有", "与已否决", "与本批", "模型自报")):
+                poolable.append({"rule": rule[:200], "why": why[:300], "category": cat, "reason": reason,
+                                 "evidence": [{"report_id": e["report_id"], "rel": ids[e["report_id"]]["rel"]}
+                                              for e in ev_ok[:3]],
+                                 "date": today, "status": "pending"})
             print(f"  观察记录：{rule[:40]}… ← {reason}")
             continue
         accepted.append((rule, why, cat, ev_ok))
         print(f"  接受：{rule}")
+
+    # v3.6：被拒候选入池（编号 RP-xxx，池内按 similar 去重，待裁量上限 POOL_CAP，总记录 60 条）
+    pool_added = 0
+    if poolable:
+        pool = load_pool()
+        items = pool.setdefault("items", [])
+        nid = max([int(str(x.get("id", ""))[3:]) for x in items
+                   if str(x.get("id", "")).startswith("RP-") and str(x.get("id", ""))[3:].isdigit()], default=0) + 1
+        for ent in poolable:
+            if any(str(x.get("status", "pending")) == "pending" and similar(ent["rule"], str(x.get("rule", ""))) >= 0.5
+                   for x in items):
+                continue  # 池里已有一条差不多的待裁量候选
+            ent["id"] = f"RP-{nid:03d}"
+            nid += 1
+            items.append(ent)
+            pool_added += 1
+        pend = [x for x in items if str(x.get("status", "pending")) == "pending"]
+        if len(pend) > POOL_CAP:
+            drop = {id(x) for x in pend[:len(pend) - POOL_CAP]}
+            pool["items"] = [x for x in items if id(x) not in drop]
+        if len(pool["items"]) > 60:
+            pool["items"] = pool["items"][-60:]
+        try:
+            save_pool(pool)
+        except Exception as e:
+            print(f"! 被拒候选池写入失败（不影响表与扫描位置）：{e}")
 
     new_lines = []
     for n, (rule, why, cat, ev) in enumerate(accepted, 1):
@@ -636,7 +693,7 @@ def collect(path, docs_root, dry, since_hours, model, config_dir=None):
         new_lines.append(f"| {lid} | 拟生效（至 {due:%Y-%m-%d %H:%M}） | {rule} | {why}（类别：{cat}） | {refs}；加入 {now:%Y-%m-%d %H:%M}（自动） |")
     summary = (f"每日收信号（自动），处理 {len(batch)} 件（积压 {len(leftover)} 件留下次），模型候选 {len(cands)} 条，"
                f"新增 {len(new_lines)} 行" + (f"（{'、'.join(l.split(' | ')[0].strip('| ') for l in new_lines)}）" if new_lines else "") +
-               f"，观察记录 {len(observations)} 条。（handoff_lessons.py）")
+               f"，观察记录 {len(observations)} 条，入池 {pool_added} 条。（handoff_lessons.py）")
     if dry:
         print("\n[dry-run] 将追加的行：")
         for l in new_lines:

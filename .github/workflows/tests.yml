@@ -24,3 +24,5 @@ jobs:
         run: python -X utf8 规范/交接写时门/tests/test_lessons.py
       - name: watchdog (no popups, no registry)
         run: python -X utf8 规范/交接写时门/tests/test_notify.py
+      - name: workflow-rules scanner (report-only)
+        run: python -X utf8 规范/交接写时门/tests/test_flow.py

@@ -207,6 +207,75 @@ n.check(T, now_utc=t0 + timedelta(hours=603), task_present=True)
 ok("267011（从没跑过）不当失败", not sent)
 n.task_last_result = lambda name: (None, None)
 
+print("== P 被拒候选池（v1.6）==")
+io.open(T, "w", encoding="utf-8", newline="\n").write("现役\n\n| 编号 | 状态 | 一句话规矩 | 为什么 | 出处 |\n|---|---|---|---|---|\n| LG-01 | 生效 | 规矩一 | 事一 | 源 |\n\n## 更新记录\n\n- 建档\n")
+json.dump({"items": [
+    {"id": "RP-001", "rule": "活正本随进展及时回流，更新时同步删改被推翻的旧结论", "why": "两个项目都犯过",
+     "category": "正本与索引维护", "reason": "涉及权限/部署/同步/冻结机制/检查器等，不自动生效（额外一层，不是语义边界）",
+     "evidence": [{"report_id": "ms-codex-1", "rel": "X/codex/2026-09-08_0100_a_交接报告.md"}],
+     "date": "2026-09-20", "status": "pending"},
+    {"id": "RP-002", "rule": "拿不准就问", "why": "含糊指令", "category": "其他",
+     "reason": "类别「其他」不在可自动生效的白名单", "evidence": [], "date": "2026-09-20", "status": "pending"},
+]}, io.open(n.POOL_PATH, "w", encoding="utf-8"))
+sent.clear()
+n.check(T, now_utc=t0 + timedelta(hours=700), task_present=True)
+page = io.open(n.STATUS_PAGE, encoding="utf-8").read()
+ok("P1 页面出现「被拒的好点子」区，每条给采纳/不用按钮",
+   "被拒的好点子" in page and "adopt/RP-001" in page and "drop/RP-001" in page)
+ok("P2 每条候选写明程序当时的拒因", "额外一层" in page and "白名单" in page)
+ok("P3 池子本身不触发「候选」类弹窗（只在页面上出现；此刻的弹窗是别的旧条件）",
+   all("候选" not in (s[0] + (s[1] or "")) and "好点子" not in s[0] for s in sent))
+tbl0 = io.open(T, encoding="utf-8").read()
+rc = n.decide("handoff-rule:adopt/RP-001", T, who="负责人")
+tbl = io.open(T, encoding="utf-8").read()
+ok("P4 adopt 返回 0 且写成人工行（拟生效 48h、出处注明原拒因、加入（人工））",
+   rc == 0 and "（人工）" in tbl and "负责人从被拒候选采纳" in tbl and "拟生效（至" in tbl)
+ok("P5 新行编号接续现有最大号（LG-02）", "| LG-02 |" in tbl)
+pool = json.load(io.open(n.POOL_PATH, encoding="utf-8"))
+ok("P6 池内标记 adopted 且记行号", pool["items"][0]["status"] == "adopted" and pool["items"][0].get("row") == "LG-02")
+ok("P7 采纳/翻篇的提示语不出现内部编号", all("RP-" not in (s[1] or "") and "LG-" not in (s[1] or "") for s in sent))
+rc = n.decide("adopt/RP-001", T)
+ok("P8 已裁决的候选再点不重复写", rc == 2 and io.open(T, encoding="utf-8").read() == tbl)
+rc = n.decide("handoff-rule:drop/RP-002", T)
+ok("P9 drop 返回 0 且标记 ignored",
+   rc == 0 and json.load(io.open(n.POOL_PATH, encoding="utf-8"))["items"][1]["status"] == "ignored")
+n.check(T, now_utc=t0 + timedelta(hours=701), task_present=True)
+page2 = io.open(n.STATUS_PAGE, encoding="utf-8").read()
+ok("P10 裁决后页面不再列这两条", "adopt/RP-001" not in page2 and "拿不准就问" not in page2)
+ok("P11 动作与编号不合法仍然全拒", n.decide("steal/RP-001", T) == 2 and n.decide("adopt/RP-999", T) == 2
+   and n.decide("adopt/../../etc/passwd", T) == 2)
+
+print("== F --with-flow 接线（v1.7）==")
+import json as _json
+DOCSF = os.path.join(ROOT, "docsf")
+WT = os.path.join(DOCSF, "工作传递", "Y", "claude-code")
+os.makedirs(WT, exist_ok=True)
+io.open(os.path.join(DOCSF, "工作传递", "协作教训.md"), "w", encoding="utf-8", newline="\n").write(
+    "现役\n\n| 编号 | 状态 | 一句话规矩 | 为什么 | 出处 |\n|---|---|---|---|---|\n| LG-01 | 生效 | 规矩一 | 事一 | 源 |\n\n## 更新记录\n\n- 建档\n")
+for i in range(3):  # 三份 → W3 碎片化
+    io.open(os.path.join(WT, f"2026-09-20_1{i}00_f{i}_交接报告.md"), "w", encoding="utf-8", newline="\n").write(
+        f"---\nstatus: ready_for_review\nreport_id: nf-{i}\nfrozen_at: 2026-09-20T10:00:00+08:00\n---\n\n# f{i}\n")
+sent.clear()
+n.check(T, now_utc=t0 + timedelta(hours=710), task_present=True, flow_root=DOCSF)
+ftodo = os.path.join(DOCSF, "工作传递", "规范扫描-待处理.md")
+ok("F1 首轮发现>0：清单落盘且处理页列「规范扫描」行",
+   os.path.exists(ftodo) and "W3" in io.open(ftodo, encoding="utf-8").read()
+   and "规范扫描" in io.open(n.STATUS_PAGE, encoding="utf-8").read())
+st_f = _json.load(io.open(os.environ["HN_STATE_PATH"], encoding="utf-8"))
+ok("F2 首轮记指纹与条数", isinstance(st_f.get("flow"), dict) and st_f["flow"]["n"] >= 1)
+ok("F3 首轮（无上轮可比）不弹", not any("规范扫描" in (s[1] or "") for s in sent))
+sent.clear()
+for i in range(3, 6):  # 再加三份别的目录 → 条数变多
+    WT2 = os.path.join(DOCSF, "工作传递", "Z", "codex")
+    os.makedirs(WT2, exist_ok=True)
+    io.open(os.path.join(WT2, f"2026-09-20_1{i}00_g{i}_交接报告.md"), "w", encoding="utf-8", newline="\n").write(
+        f"---\nstatus: ready_for_review\nreport_id: ng-{i}\nfrozen_at: 2026-09-20T10:00:00+08:00\n---\n\n# g{i}\n")
+n.check(T, now_utc=t0 + timedelta(hours=711), task_present=True, flow_root=DOCSF)
+ok("F4 发现变多才弹负责人一条", any("规范扫描" in (s[0] + (s[1] or "")) for s in sent))
+sent.clear()
+n.check(T, now_utc=t0 + timedelta(hours=712), task_present=True, flow_root=DOCSF)
+ok("F5 条数不变不再弹", not sent)
+
 n_fail = sum(1 for _, c in results if not c)
 print(f"\n合计 {len(results)} 项，失败 {n_fail} 项")
 shutil.rmtree(ROOT, ignore_errors=True)

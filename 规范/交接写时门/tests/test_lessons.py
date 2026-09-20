@@ -271,6 +271,46 @@ REAL_CALL_MODEL("提示词", "sonnet", "某账号目录")
 ok("L5 provider=claude 时仍走 claude CLI", seen.get("claude") == "sonnet")
 m.PROVIDER = "claude"
 
+print("== K 被拒候选池与新增类目（v3.6）==")
+reset_state()
+if os.path.exists(m.POOL_PATH):
+    os.remove(m.POOL_PATH)
+T = table(["| LG-01 | 生效 | 规矩一 | 事一 | 源 |"])
+EV2 = [{"report_id": "ms-codex-1", "quote": "frozen_at 写成了尚未到达的计划时间"},
+       {"report_id": "us3-2", "quote": "文件名时间比实际收阅时间晚"}]
+KCANDS = [
+    {"rule": "结论被更正后在索引标处置，口径冲突时指明唯一现行真源", "why": "两次索引失修", "category": "正本与索引维护",
+     "evidence": EV2},
+    {"rule": "验收按实际证据等级写，作者自测不写成独立复核", "why": "两次拔高", "category": "验收与状态",
+     "evidence": EV2},
+    {"rule": "引用回执或跟进件来判断当前状态之前，先看清楚件内的观测或冻结时刻，文件名里的时间只是起草时点，绝不能当作结论的公布时刻来引用，两个时刻必须分开", "why": "超长", "category": "时间戳",
+     "evidence": EV2},
+    {"rule": "含糊指令先问再动", "why": "类别不合", "category": "其他",
+     "evidence": [{"report_id": "ms-codex-3", "quote": "同步前不必核哈希"}]},
+    {"rule": "规矩一", "why": "与现有重复", "category": "格式与字段",
+     "evidence": EV2},
+]
+m.call_model = lambda prompt, model, config_dir=None: {"scanned": 3, "candidates": KCANDS}
+rc = m.collect(T, DOCS, False, 24, "fake")
+txt = io.open(T, encoding="utf-8").read()
+rows = [l for l in txt.split("\n") if l.startswith("| LG-")]
+ok("K1 新类目「正本与索引维护」可自动进表", len(rows) == 3 and "正本与索引维护" in rows[1])
+ok("K2 新类目「验收与状态」可自动进表", "验收与状态" in rows[2])
+pool = json.load(io.open(m.POOL_PATH, encoding="utf-8"))
+items = pool.get("items", [])
+pends = [x for x in items if x.get("status") == "pending"]
+ok("K3 超字数候选入池且带拒因", any("超过" in x.get("reason", "") for x in pends))
+ok("K4 类别不合/证据不足候选入池", any(x.get("rule") == "含糊指令先问再动" for x in pends))
+ok("K5 池条目带核验过的证据件相对路径", all(x.get("evidence") for x in pends) and
+   any(str(x["evidence"][0].get("rel", "")).endswith("_交接报告.md") for x in pends))
+ok("K6 与现有行近似的不入池", not any("规矩一" in x.get("rule", "") for x in items))
+ok("K7 池条目有 RP 编号且待裁量", all(str(x.get("id", "")).startswith("RP-") for x in items))
+n_before = len(pends)
+reset_state()
+m.collect(T, DOCS, False, 24, "fake")
+pends2 = [x for x in json.load(io.open(m.POOL_PATH, encoding="utf-8"))["items"] if x.get("status") == "pending"]
+ok("K8 池内去重：重跑同样的候选不重复入池", len(pends2) == n_before)
+
 n_fail = sum(1 for _, c in results if not c)
 print(f"\n合计 {len(results)} 项，失败 {n_fail} 项")
 shutil.rmtree(ROOT, ignore_errors=True)
