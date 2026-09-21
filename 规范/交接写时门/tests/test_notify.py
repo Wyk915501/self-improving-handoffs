@@ -226,7 +226,24 @@ ok("P2 每条候选写明程序当时的拒因", "额外一层" in page and "白
 ok("P3 池子本身不触发「候选」类弹窗（只在页面上出现；此刻的弹窗是别的旧条件）",
    all("候选" not in (s[0] + (s[1] or "")) and "好点子" not in s[0] for s in sent))
 tbl0 = io.open(T, encoding="utf-8").read()
-rc = n.decide("handoff-rule:adopt/RP-001", T, who="负责人")
+# v1.9：采纳要带处理页口令（页面链接里那一段）。先验三种拿不到口令的调用都被拒，再用页面上的真链接采纳。
+import re as _re
+rc_bare = n.decide("handoff-rule:adopt/RP-001", T, who="负责人")
+rc_wrong = n.decide("handoff-rule:adopt/RP-001/0123456789", T, who="负责人")
+ok("Q1 不带口令或口令不对的采纳一律被拒，表一个字不变",
+   rc_bare == 2 and rc_wrong == 2 and io.open(T, encoding="utf-8").read() == tbl0)
+m_link = _re.search(r'handoff-rule:adopt/RP-001/([0-9a-f]{10})"', page)
+ok("Q2 页面「采纳」链接带 10 位口令，且等于 pool_token 算出来的",
+   bool(m_link) and m_link.group(1) == n.pool_token(json.load(io.open(n.POOL_PATH, encoding="utf-8"))["items"][0]))
+_p = json.load(io.open(n.POOL_PATH, encoding="utf-8"))
+_p["items"][0]["rule"] += "（被人改过）"
+json.dump(_p, io.open(n.POOL_PATH, "w", encoding="utf-8"), ensure_ascii=False)
+ok("Q3 候选正文变了，旧页面上的口令自动作废（读到的字和写进表的字必须是同一条）",
+   n.decide(f"handoff-rule:adopt/RP-001/{m_link.group(1)}", T) == 2 and io.open(T, encoding="utf-8").read() == tbl0)
+_p["items"][0]["rule"] = _p["items"][0]["rule"].replace("（被人改过）", "")
+json.dump(_p, io.open(n.POOL_PATH, "w", encoding="utf-8"), ensure_ascii=False)
+sent.clear()
+rc = n.decide(f"handoff-rule:adopt/RP-001/{m_link.group(1)}", T, who="负责人")
 tbl = io.open(T, encoding="utf-8").read()
 ok("P4 adopt 返回 0 且写成人工行（拟生效 48h、出处注明原拒因、加入（人工））",
    rc == 0 and "（人工）" in tbl and "负责人从被拒候选采纳" in tbl and "拟生效（至" in tbl)
@@ -275,6 +292,147 @@ ok("F4 发现变多才弹负责人一条", any("规范扫描" in (s[0] + (s[1] o
 sent.clear()
 n.check(T, now_utc=t0 + timedelta(hours=712), task_present=True, flow_root=DOCSF)
 ok("F5 条数不变不再弹", not sent)
+
+print("== Q 复验补测（v1.9，fable 2026-09-21_1210 件）==")
+from datetime import datetime as _dt
+# Q4 由池采纳的规矩：点了「同意」也不静音到期催告；普通规矩点了「同意」照旧静音
+_now = _dt.now(timezone.utc)
+_due = (_now + timedelta(hours=48)).astimezone(n.BJ)
+_tbl_q = io.open(T, encoding="utf-8").read()  # 先读后写：同一条语句里先 open("w") 会把文件清空
+io.open(T, "w", encoding="utf-8", newline="\n").write(
+    _tbl_q.replace("\n\n## 更新记录",
+    f"\n| LG-21 | 拟生效（至 {_due:%Y-%m-%d %H:%M}） | 从池里采纳的规矩 | 事（类别：其他；负责人从被拒候选采纳，程序当时没让它自动生效的原因：越界） | 源；加入 {_now.astimezone(n.BJ):%Y-%m-%d %H:%M}（人工） |"
+    f"\n| LG-22 | 拟生效（至 {_due:%Y-%m-%d %H:%M}） | 普通新规矩 | 事三 | 源；加入 {_now.astimezone(n.BJ):%Y-%m-%d %H:%M}（自动） |\n\n## 更新记录", 1))
+ok("Q4a 两条「同意」都记下了", n.decide("ok/LG-21", T) == 0 and n.decide("ok/LG-22", T) == 0)
+sent.clear()
+n.check(T, now_utc=_now + timedelta(hours=40), task_present=True)
+_page = io.open(n.STATUS_PAGE, encoding="utf-8").read()
+ok("Q4b 到期在即：由池采纳的 LG-21 仍然催一次（标题问「看一眼」），普通的 LG-22 已同意不再催",
+   any("新规矩要加给 AI" in s[0] and "1 条" in s[0] for s in sent))
+st_q = json.load(io.open(os.environ["HN_STATE_PATH"], encoding="utf-8"))
+ok("Q4c 催过的是 LG-21 不是 LG-22", any(k.startswith("pendue:LG-21:") for k in st_q["notified"])
+   and not any(k.startswith("pendue:LG-22:") for k in st_q["notified"]))
+
+# Q5 规矩文字含换行：写进表必须还是完整的一行
+_p = json.load(io.open(n.POOL_PATH, encoding="utf-8"))
+_p["items"].append({"id": "RP-003", "rule": "第一行\n第二行 | 带竖线", "why": "w", "category": "其他", "reason": "r",
+                    "evidence": [], "date": "2026-09-21", "status": "pending"})
+for _i in range(4):
+    _p["items"].append({"id": f"RP-10{_i}", "rule": f"旧{_i}", "status": "evicted", "evicted": "2026-09-21 09:00"})
+json.dump(_p, io.open(n.POOL_PATH, "w", encoding="utf-8"), ensure_ascii=False)
+rc = n.decide("adopt/RP-003/" + n.pool_token(_p["items"][-5]), T)
+_rows = [ln for ln in io.open(T, encoding="utf-8").read().split("\n") if ln.startswith("| LG-23 |")]
+ok("Q5 含换行与竖线的规矩写成完整一行（5 格齐全）", rc == 0 and len(_rows) == 1 and len(n.cells_of(_rows[0])) >= 5
+   and "第一行 第二行 ／ 带竖线" in _rows[0])
+_L = io.open(T, encoding="utf-8").read().split("\n")
+_h = _L.index("## 更新记录")
+ok("Q6 采纳的更新记录插在「更新记录」标题正下方（与每日学习同口径，最新在上）",
+   "RP-003" in next(ln for ln in _L[_h + 1:] if ln.strip()))
+
+# Q7 池满过期条数写在页面上
+n.check(T, now_utc=_now + timedelta(hours=41), task_present=True)
+ok("Q7 处理页写出「另有 4 条…已经过期」（即使此刻没有待裁量的候选）", "另有 4 条" in io.open(n.STATUS_PAGE, encoding="utf-8").read())
+
+# Q8 状态合并：值班运行期间磁盘上新写的「同意」与口令种子，收尾写回时都得留着
+_disk = json.load(io.open(os.environ["HN_STATE_PATH"], encoding="utf-8"))
+_mem = {k: v for k, v in _disk.items() if k not in ("agreed", "page_secret")}
+_mem["notified"] = dict(_disk.get("notified") or {}, **{"probe:key": "2026-09-21 12:00"})
+_disk.setdefault("agreed", {})["LG-77"] = "clicked-during-check"
+json.dump(_disk, io.open(os.environ["HN_STATE_PATH"], "w", encoding="utf-8"), ensure_ascii=False)
+n.merge_save_state(_mem)
+_after = json.load(io.open(os.environ["HN_STATE_PATH"], encoding="utf-8"))
+ok("Q8 merge_save_state：磁盘上的 agreed 与 page_secret 保留、内存里新增的 notified 也在",
+   _after.get("agreed", {}).get("LG-77") == "clicked-during-check" and _after.get("page_secret") == _disk.get("page_secret")
+   and "probe:key" in _after.get("notified", {}))
+
+# Q9 扫描脚本崩了：当日给负责人一条"没跑成"，不拖垮 check
+_here0, _bad = n.HERE, os.path.join(ROOT, "badhere")
+os.makedirs(_bad, exist_ok=True)
+io.open(os.path.join(_bad, "handoff_flow.py"), "w", encoding="utf-8").write("raise RuntimeError('boom')\n")
+shutil.copy(os.path.join(_here0, "handoff_lessons.py"), _bad)
+n.HERE = _bad
+sent.clear()
+rc = n.check(T, now_utc=t0 + timedelta(hours=800), task_present=True, flow_root=DOCSF)
+ok("Q9 扫描崩溃：check 照常返回、弹出「没跑成」", rc in (0, 1) and any("没跑成" in (s[1] or "") for s in sent))
+n.HERE = _here0
+
+# Q10 超过 20 条发现以后，新增一条也必须触发（v1.8 的指纹取自截断后的 stdout，12 次漏 8 次）
+DOCSG = os.path.join(ROOT, "docsg")
+def _mkdir3(i):
+    d = os.path.join(DOCSG, "工作传递", f"线{i:03d}", "codex")
+    os.makedirs(d, exist_ok=True)
+    for j in range(3):
+        io.open(os.path.join(d, f"2026-09-21_0{j}00_任务{i}第{j}份_交接报告.md"), "w", encoding="utf-8").write("---\nstatus: draft\n---\n")
+for _i in range(25):
+    _mkdir3(_i)
+n.check(T, now_utc=t0 + timedelta(hours=900), task_present=True, flow_root=DOCSG)   # 口径/树都换了 → 只记基线
+_st = json.load(io.open(os.environ["HN_STATE_PATH"], encoding="utf-8"))
+ok("Q10a 基线记下全部 25 个稳定键（不是截断后的 20 条）", _st["flow"]["n"] == 25 and len(_st["flow"]["fps"]) == 25 and _st["flow"].get("kind") == "keys")
+_miss = 0
+for _k in range(6):
+    _mkdir3(100 + _k)
+    sent.clear()
+    n.check(T, now_utc=t0 + timedelta(hours=900 + 24 * (_k + 1)), task_present=True, flow_root=DOCSG)  # 每次隔一天，避开"一天只弹一条"
+    _miss += not any("新的不规范" in (s[1] or "") for s in sent)
+ok("Q10b 逐个新增 6 个碎片化目录，6 次全部触发（漏 0 次）", _miss == 0)
+sent.clear()
+n.check(T, now_utc=t0 + timedelta(hours=900 + 24 * 8), task_present=True, flow_root=DOCSG)
+ok("Q10c 什么都没变：隔天再跑不弹", not any("新的不规范" in (s[1] or "") for s in sent))
+
+print("== R 独立验收补测（fable 子代理 09-21：同日第二批、弹窗未送达、口令绑种子与全字段、采纳走锁与哈希门）==")
+_H = 900 + 24 * 20
+def _alerted():
+    return any("新的不规范" in (s[1] or "") for s in sent)
+_mkdir3(200); sent.clear()
+n.check(T, now_utc=t0 + timedelta(hours=_H), task_present=True, flow_root=DOCSG)
+_a1 = _alerted()
+_mkdir3(201); sent.clear()
+n.check(T, now_utc=t0 + timedelta(hours=_H + 4), task_present=True, flow_root=DOCSG)   # 同一天第二批：当日已弹过，不再弹
+_a2 = _alerted(); sent.clear()
+n.check(T, now_utc=t0 + timedelta(hours=_H + 24), task_present=True, flow_root=DOCSG)  # 次日：什么都没再变，但第二批必须补弹
+_a3 = _alerted(); sent.clear()
+n.check(T, now_utc=t0 + timedelta(hours=_H + 48), task_present=True, flow_root=DOCSG)
+ok("R1 同一天第二批新发现：当天不重复弹，次日补弹一次，之后不再弹", _a1 and not _a2 and _a3 and not _alerted())
+_mkdir3(202); _toast_ok = n.toast
+n.toast = lambda *a, **k: (sent.append((a[0], a[1], None, True)), False)[1]            # 弹窗送不出去
+n.check(T, now_utc=t0 + timedelta(hours=_H + 72), task_present=True, flow_root=DOCSG)
+n.toast = _toast_ok; sent.clear()
+n.check(T, now_utc=t0 + timedelta(hours=_H + 76), task_present=True, flow_root=DOCSG)  # 同一天下一轮：上次没送达，这次必须再弹
+ok("R2 弹窗没送达：新发现不被基线吞掉，下一轮照样提醒", _alerted())
+
+_ent = {"id": "RP-050", "rule": "规矩", "why": "原因", "category": "其他", "reason": "拒因", "evidence": [{"report_id": "a", "rel": "x.md"}]}
+ok("R3 口令必须绑本机种子（换种子口令就变；没有种子算不出口令）",
+   n.pool_token(_ent, "A" * 32) != n.pool_token(_ent, "B" * 32) and len(n.pool_token(_ent, "A" * 32)) == 10)
+ok("R4 口令绑住所有会写进表的字：只改「为什么」或证据件，口令也变",
+   n.pool_token(_ent, "A") != n.pool_token(dict(_ent, why="伪造的原因"), "A")
+   and n.pool_token(_ent, "A") != n.pool_token(dict(_ent, evidence=[{"report_id": "伪造", "rel": "y.md"}]), "A"))
+
+_p = json.load(io.open(n.POOL_PATH, encoding="utf-8"))
+_p["items"].append(dict(_ent, date="2026-09-21", status="pending"))
+json.dump(_p, io.open(n.POOL_PATH, "w", encoding="utf-8"), ensure_ascii=False)
+_tok = n.pool_token(_p["items"][-1])
+_lockp = os.path.join(os.environ["HANDOFF_TOOLS_DIR"], "handoff_lessons.lock")
+os.makedirs(os.path.dirname(_lockp), exist_ok=True)
+io.open(_lockp, "w").write("other 2026-09-21T00:00:00+00:00")
+_before = io.open(T, encoding="utf-8").read()
+ok("R5 每日学习占着锁时采纳不写表（返回 2、表一个字不变）",
+   n.decide(f"adopt/RP-050/{_tok}", T) == 2 and io.open(T, encoding="utf-8").read() == _before)
+os.remove(_lockp)
+_real_open, _hit = io.open, {"n": 0}
+def _racing_open(p, *a, **k):   # 采纳读表之后、写表之前，别的写者改了表
+    f = _real_open(p, *a, **k)
+    if os.path.abspath(str(p)) == os.path.abspath(T) and not _hit["n"] and (not a or a[0] == "r"):
+        _hit["n"] = 1
+        data = f.read(); f.close()
+        _real_open(T, "w", encoding="utf-8", newline="\n").write(data.replace("## 更新记录", "<!-- 别的写者刚动过 -->\n\n## 更新记录", 1))
+        return io.StringIO(data)
+    return f
+n.io.open = _racing_open
+_rc = n.decide(f"adopt/RP-050/{_tok}", T)
+n.io.open = _real_open
+_after = _real_open(T, encoding="utf-8").read()
+ok("R6 读表后表被别人改过：哈希门拦下，采纳放弃、别人的改动还在、没写出新规矩",
+   _rc == 2 and "别的写者刚动过" in _after and "| 规矩 |" not in _after)
 
 n_fail = sum(1 for _, c in results if not c)
 print(f"\n合计 {len(results)} 项，失败 {n_fail} 项")

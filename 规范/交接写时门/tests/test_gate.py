@@ -262,6 +262,32 @@ io.open(idx3, "w", encoding="utf-8", newline="\n").write("现役\n\n- [大小写
 pr3 = g.index_problems(idx3)
 ok("G8③ 整体存在性逐段精确比对：Sub/ 与 sub/ 不同（NTFS 上 exists 会放过）", any("目录前缀" in x and "Sub/" in x for x in pr3) and not any("sub/共名" in x for x in pr3))
 
+print("== v2.6 _archive 排除（克隆-调整-归档的落地前提，fable 09-21）==")
+arch = os.path.join(ROOT, "工作传递", "Z", "_archive", "2026-09-21_0900_归档旧件_交接报告.md")
+os.makedirs(os.path.dirname(arch), exist_ok=True)
+io.open(arch, "w", encoding="utf-8", newline="\n").write("草稿\n这不是一份合格的报告，且链接 [断的](../不存在的目标.md) 深了一层。\n")
+ok("v2.6-1 is_target 不认 _archive 下的报告", not g.is_target(arch))
+live = os.path.join(ROOT, "工作传递", "Z", "2026-09-21_0901_现行件_交接报告.md")
+io.open(live, "w", encoding="utf-8", newline="\n").write("---\nstatus: draft\nreport_id: za-1\n---\n\n# x\n")
+ok("v2.6-2 非 _archive 的报告仍认", g.is_target(live))
+
+print("== v2.7 G6：目标已归档（同目录 _archive/ 下有同名件）不算断链（fable 09-21 复验）==")
+ZD = os.path.join(ROOT, "工作传递", "Z")
+moved = "2026-09-21_0800_被克隆取代的旧件_交接报告.md"
+io.open(os.path.join(ZD, "_archive", moved), "w", encoding="utf-8", newline="\n").write("旧件正文一字不动\n")
+citer = os.path.join(ROOT, "工作传递", "Y2", "2026-09-21_0902_引用旧址的冻结件_交接报告.md")
+os.makedirs(os.path.dirname(citer), exist_ok=True)
+io.open(citer, "w", encoding="utf-8", newline="\n").write(fm() + f"\n# x\n\n见[旧件](../Z/{moved})，以及[真没了的](../Z/2026-09-21_0801_从未存在_交接报告.md)。\n")
+pr = g.check(citer)
+g6 = [x for x in pr if x.startswith("G6 ")]
+ok("v2.7-1 指向已归档旧址的链接放行", not any(moved in x for x in g6))
+ok("v2.7-2 真不存在的目标照报（不因此放松）", any("从未存在" in x for x in g6) and "1 个链接" in g6[0])
+
+io.open(os.path.join(ZD, "_archive", "README.md"), "w", encoding="utf-8").write("归档说明\n")
+citer2 = os.path.join(ROOT, "工作传递", "Y2", "2026-09-21_0903_引用不存在的索引_交接报告.md")
+io.open(citer2, "w", encoding="utf-8", newline="\n").write(fm() + "\n# x\n\n见[索引](../Z/README.md)。\n")
+ok("v2.7-3 只对交接报告放行：_archive/ 里恰好有同名 README 不能让断链过关", any(x.startswith("G6 ") for x in g.check(citer2)))
+
 n_fail = sum(1 for _, c in results if not c)
 print(f"\n合计 {len(results)} 项，失败 {n_fail} 项")
 shutil.rmtree(ROOT, ignore_errors=True)

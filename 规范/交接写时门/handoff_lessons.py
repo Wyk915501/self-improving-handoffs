@@ -1,8 +1,10 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
+v3.6.2 · 2026-09-21 · fable 复验：①归档件（_archive/）不再当新件送读，判来源目录时跳过 _archive 这一级（原来评审来源的归档件会被当成"原始事件"）；②候选池读不出来先改名留存，不再当空池覆盖。
 handoff_lessons.py —— 协作教训表的无人值守维护
-v3.6 · 2026-09-20 · 病根修复（负责人 09-19/09-20：好候选被拒后只沉日志，等于没学）：①类别白名单补
+v3.6.1 · 2026-09-21 · 按 fable 核查：池溢出从"整条删掉"改"标 evicted 留痕"（总量 60 修剪自然淘汰）。
+（v3.6 · 2026-09-20 · 病根修复（负责人 09-19/09-20：好候选被拒后只沉日志，等于没学）：①类别白名单补
     「正本与索引维护」「验收与状态」两类（正本/索引维护习惯与验收口径本就是协作教训主场，缺类目导致好候选全灭）；
     ②新增「被拒候选池」——除垃圾与重复外的被拒候选（超字数/类别不合/越界关键词/证据不足/冲突/配额）全部入池
     （~/.claude/tools/handoff_rejected_pool.json，上限 20 条待裁量），处理页上负责人可一键采纳成人工行或翻篇。
@@ -193,9 +195,22 @@ def bigrams(s):
 
 
 def load_pool():
+    """读候选池。读不出来分两种：文件内容坏了（不是合法 JSON／不是字典）→ 改名留存、从空池开始；
+    一时读不到（权限、对方正在替换）→ 抛 OSError，让本轮不要碰池（调用方已有 try 包着），别把好池当坏池。
+    独立验收（fable 09-21）：原写法异常时文件句柄还挂着，Windows 上改名会失败；且把一切异常都当损坏。"""
+    if not os.path.exists(POOL_PATH):
+        return {"items": []}
+    with io.open(POOL_PATH, encoding="utf-8") as f:  # 先读完并关掉句柄，再解析
+        raw = f.read()
     try:
-        return json.load(io.open(POOL_PATH, encoding="utf-8")) or {}
-    except Exception:
+        pool = json.loads(raw) if raw.strip() else {"items": []}
+        if not isinstance(pool, dict) or not isinstance(pool.get("items", []), list):
+            raise ValueError("池文件不是 {items: [...]} 结构")
+        return pool
+    except ValueError as e:
+        bad = POOL_PATH + f".corrupt-{datetime.now(timezone.utc):%Y%m%dT%H%M%S%fZ}"  # 到微秒：同一秒两次留存不能互相覆盖
+        os.replace(POOL_PATH, bad)  # 改名失败就让它抛出去：宁可这轮不入池，也不从空池覆盖
+        print(f"! 被拒候选池内容损坏（{e}），已改名留存为 {bad}，本次从空池开始")
         return {"items": []}
 
 
@@ -383,6 +398,27 @@ def load_report(p, base):
             "title": fm.get("title", ""), "body": body[:BODY_CAP], "full": text}
 
 
+def _under_handoff(p):
+    """报告路径里「工作传递」之后的各段（找不到就用全部段）。只看这一截，工作区上层目录叫什么都不影响判断。"""
+    segs = os.path.abspath(p).replace("\\", "/").split("/")
+    i = max((k for k, x in enumerate(segs) if x == "工作传递"), default=-1)
+    return segs[i + 1:]
+
+
+def source_dir_of(p):
+    """报告所属的来源目录名：正常是上一级目录；在归档里（<来源>/_archive/…，下面再分月份也一样）就取 _archive 前面那一段。
+    v3.6.2（fable 09-21 复验）：原来只看上一级，报告搬进 <来源>/_archive/ 后上一级变成 _archive，
+    评审来源的归档件就不再被当成评审件——证据门槛被悄悄放松。"""
+    segs = _under_handoff(p)[:-1]
+    if "_archive" in segs:
+        segs = segs[:segs.index("_archive")]
+    return segs[-1] if segs else ""
+
+
+def is_archived(p):
+    return "_archive" in _under_handoff(p)[:-1]
+
+
 def known_report_ids(docs_root):
     """可作"原始事件"的报告 report_id 集合：全树交接报告里**不在来源目录（SOURCES）下**的那些。用来核"判决件说它在评的那份原件"
     是否真实存在——否则四道兜验证的只是"模型忠实转述了判决件"，不是"事件发生过"（GLM 09-09）。
@@ -390,7 +426,7 @@ def known_report_ids(docs_root):
     只验存在不验相关：判决件填一个真实原件 ID 再虚构叙述，程序看不出——见 README「程序守不住的两条」。"""
     ids = set()
     for p in glob.glob(os.path.join(docs_root, "工作传递", "**", "*_交接报告.md"), recursive=True):
-        if os.path.basename(os.path.dirname(p)) in SOURCES:
+        if source_dir_of(p) in SOURCES:
             continue
         try:
             fm, _ = parse_fm(read(p))
@@ -406,8 +442,8 @@ def enumerate_new(docs_root, since_utc):
     base = os.path.join(docs_root, "工作传递")
     out = []
     for p in glob.glob(os.path.join(base, "**", "*_交接报告.md"), recursive=True):
-        if os.path.basename(os.path.dirname(p)) not in SOURCES:
-            continue
+        if is_archived(p) or source_dir_of(p) not in SOURCES:
+            continue  # 归档件不再当新件送去读：要么已被克隆件取代，要么是成批归档的旧对话件
         if datetime.fromtimestamp(os.path.getmtime(p), timezone.utc) < since_utc:
             continue
         out.append(os.path.abspath(p))
@@ -662,7 +698,12 @@ def collect(path, docs_root, dry, since_hours, model, config_dir=None):
     # v3.6：被拒候选入池（编号 RP-xxx，池内按 similar 去重，待裁量上限 POOL_CAP，总记录 60 条）
     pool_added = 0
     if poolable:
-        pool = load_pool()
+        try:
+            pool = load_pool()
+        except OSError as e:
+            print(f"! 被拒候选池这一轮读不到（{e}），本轮不入池、不动池文件（候选仍记在观察记录里）")
+            pool, poolable = None, []
+    if poolable:
         items = pool.setdefault("items", [])
         nid = max([int(str(x.get("id", ""))[3:]) for x in items
                    if str(x.get("id", "")).startswith("RP-") and str(x.get("id", ""))[3:].isdigit()], default=0) + 1
@@ -676,8 +717,10 @@ def collect(path, docs_root, dry, since_hours, model, config_dir=None):
             pool_added += 1
         pend = [x for x in items if str(x.get("status", "pending")) == "pending"]
         if len(pend) > POOL_CAP:
-            drop = {id(x) for x in pend[:len(pend) - POOL_CAP]}
-            pool["items"] = [x for x in items if id(x) not in drop]
+            # 溢出不删记录（fable 09-21：整条删掉＝无痕消失）：最老的待裁量项标 evicted 留在池里，
+            # 总量 60 的修剪自然淘汰；想捞回仍可从池文件里看到原文
+            for x in pend[:len(pend) - POOL_CAP]:
+                x["status"], x["evicted"] = "evicted", f"{now:%Y-%m-%d %H:%M}"
         if len(pool["items"]) > 60:
             pool["items"] = pool["items"][-60:]
         try:

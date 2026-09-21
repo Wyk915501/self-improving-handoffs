@@ -2,7 +2,9 @@
 # -*- coding: utf-8 -*-
 """
 handoff_gate.py —— 交接报告写后检查（零 LLM，机械核验）
-v2.5 · 2026-09-09 · 按 GLM 二轮复核：G6 反斜杠项改编号 G6P（扫描/清单只滤 G6 断链、不滤 G6P）；G6/G8 文件名含 # 先整体查；
+v2.7 · 2026-09-21 · fable 复验：G6 链接目标不在原址但同目录 _archive/ 下有同名件＝已归档，放行；克隆路线旧件可直接搬走不留跳转件
+v2.6 · 2026-09-21 · is_target 排除 _archive/（fable 09-21 评估：克隆-调整-归档的落地前提——归档旧件相对链接深一层必断、冻结件没人能修，会永久挂清单）。检查逻辑零变化，只是范围口径与 is_index 对齐。
+（v2.5 · 2026-09-09 · 按 GLM 二轮复核：G6 反斜杠项改编号 G6P（扫描/清单只滤 G6 断链、不滤 G6P）；G6/G8 文件名含 # 先整体查；
      ③类整体存在性逐段精确比对；载荷深搜跳过正文字段；目录列不出直接报
 （v2.4 · 同日按 GLM 复核：G8 加③正斜杠目录前缀、同目录比对区分大小写、hook 写索引 README 当场报①③；G6 反斜杠链接判不可移植）
 （v2.3 · 同日按 Astra 对抗复核修正 G8 Markdown 转义与波浪线围栏；v2.2 · 同日按 US3 Claude 1750 加 G8）
@@ -97,8 +99,13 @@ if yaml is not None:
 
 
 def is_target(path):
+    """报告检查范围：路径含 工作传递 且以 _交接报告.md 结尾，且不在 _archive/ 里（v2.6）。
+    _archive＝冻结快照，与 is_index 同一哲学；克隆-调整-归档路线的落地前提——旧件挪进去后
+    相对链接深一层必断、冻结件没人能修，不排除的话会永久挂在待处理清单上（fable 09-21 评估）。"""
     p = os.path.abspath(path).replace("\\", "/")
-    return "工作传递" in p and p.endswith("_交接报告.md")
+    if "工作传递" not in p or not p.endswith("_交接报告.md"):
+        return False
+    return not any(seg == "_archive" for seg in p.split("/"))
 
 
 def is_index(path):
@@ -330,6 +337,16 @@ def check(path, hook_mode=False):
         if not cands:
             continue
         if not any(os.path.exists(c if os.path.isabs(c) else os.path.join(base, c)) for c in cands):
+            # v2.7（fable 09-21 复验）：目标不在原址、但它所在目录的 _archive/ 里有同名文件＝已归档，不算断链。
+            # 这样"克隆-调整-归档"可以把旧件直接搬走、原址不留跳转件（跳转件自己过不了 G2/G3，还会被数进碎片化），
+            # 别人冻结件里指向旧址的链接也不用改（它们也改不了）。
+            def _archived(c):
+                full = c if os.path.isabs(c) else os.path.join(base, c)
+                name = os.path.basename(full.rstrip("/"))
+                # 只对交接报告放行：README 之类的同名件在 _archive/ 里很常见，不能因此放过真断链
+                return name.endswith("_交接报告.md") and os.path.isfile(os.path.join(os.path.dirname(full.rstrip("/")), "_archive", name))
+            if any(_archived(c) for c in cands):
+                continue
             broken.append(whole)  # 报原文，不报剥过锚点的串（GLM 09-09 三轮）
     if nonportable:
         probs.append(f"G6P {len(nonportable)} 个链接目标含反斜杠「\\」（本机 Windows 能解析，另一台机器上必断；一律用正斜杠；扫描与清单不过滤本项）：{'；'.join(nonportable[:5])}{' …' if len(nonportable) > 5 else ''}")

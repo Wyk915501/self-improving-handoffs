@@ -1,5 +1,6 @@
 # -*- coding: utf-8 -*-
 """lessons v3 离线端到端用例：假模型 + 临时 docs 树。不调 claude、不碰真实表。"""
+from datetime import datetime, timezone
 import io, os, sys, json, shutil, importlib.util, tempfile
 
 LESSONS = sys.argv[1] if len(sys.argv) > 1 else os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "handoff_lessons.py")
@@ -310,6 +311,66 @@ reset_state()
 m.collect(T, DOCS, False, 24, "fake")
 pends2 = [x for x in json.load(io.open(m.POOL_PATH, encoding="utf-8"))["items"] if x.get("status") == "pending"]
 ok("K8 池内去重：重跑同样的候选不重复入池", len(pends2) == n_before)
+
+print("== M 归档与池的收尾（v3.6.2，fable 2026-09-21_1210 件）==")
+pa = w("X/codex/_archive/2026-09-01_0100_归档的评审件_交接报告.md", report("arch-judge-1", "orig-1", "评审正文"))
+pb = w("X/claude-code/_archive/2026-09-01_0200_归档的原件_交接报告.md", report("arch-orig-1", "", "原件正文"))
+ok("M1 判来源目录时跳过 _archive 这一级", m.source_dir_of(pa) == "codex" and m.source_dir_of(pb) == "claude-code")
+kid = m.known_report_ids(DOCS)
+ok("M2 评审来源的归档件不算「原始事件」，非评审来源的归档原件仍算", "arch-judge-1" not in kid and "arch-orig-1" in kid)
+ok("M3 归档件不再当新件送读", not any("_archive" in p.replace("\\", "/") for p in m.enumerate_new(DOCS, datetime(2000, 1, 1, tzinfo=timezone.utc))))
+_pool = {"items": [{"id": f"RP-{i:03d}", "rule": f"占位{i:02d}号" + chr(0x4e00 + i * 37) * 6, "why": "w", "category": "其他",
+                    "reason": "r", "evidence": [], "date": "2026-09-01", "status": "pending"} for i in range(1, 21)]}
+json.dump(_pool, io.open(m.POOL_PATH, "w", encoding="utf-8"), ensure_ascii=False)
+reset_state()
+m.collect(T, DOCS, False, 24, "fake")
+_items = json.load(io.open(m.POOL_PATH, encoding="utf-8"))["items"]
+_ev = [x for x in _items if x.get("status") == "evicted"]
+ok("M4 池满：最老的待裁量项标 evicted 留痕（不是整条删掉），待裁量仍不超过 20",
+   len(_ev) >= 1 and all(x.get("evicted") for x in _ev) and _ev[0]["id"] == "RP-001"
+   and len([x for x in _items if x.get("status") == "pending"]) <= 20 and len(_items) > 20)
+io.open(m.POOL_PATH, "w", encoding="utf-8").write("{broken json")
+_got = m.load_pool()
+_kept = [f for f in os.listdir(os.path.dirname(m.POOL_PATH)) if ".corrupt-" in f]
+ok("M5 池文件读不出来：改名留存，不当空池直接覆盖", _got == {"items": []} and len(_kept) == 1
+   and io.open(os.path.join(os.path.dirname(m.POOL_PATH), _kept[0]), encoding="utf-8").read() == "{broken json")
+
+pc = w("X/codex/_archive/2026-09/2026-09-01_0300_按月分层的归档评审件_交接报告.md", report("arch-judge-2", "orig-1", "评审正文"))
+ok("M6 归档下面再分月份：来源目录仍判成 codex，不算原始事件", m.source_dir_of(pc) == "codex" and "arch-judge-2" not in m.known_report_ids(DOCS))
+_up = os.path.join(ROOT, "_archive", "快照", "docs")
+_pu = os.path.join(_up, "工作传递", "X", "codex", "2026-09-01_0400_上层目录叫archive_交接报告.md")
+os.makedirs(os.path.dirname(_pu), exist_ok=True)
+io.open(_pu, "w", encoding="utf-8").write(report("up-1", "orig-1", "正文"))
+ok("M7 工作区上层目录恰好叫 _archive：不会把整棵树当归档件漏掉", not m.is_archived(_pu) and m.source_dir_of(_pu) == "codex")
+io.open(m.POOL_PATH, "w", encoding="utf-8").write("[1, 2]")
+ok("M8 池文件是合法 JSON 但不是 {items:[…]} 结构：同样改名留存，不原样返回去炸下游", m.load_pool() == {"items": []})
+json.dump({"items": [{"id": "RP-900", "rule": "好池里的一条", "status": "pending"}]}, io.open(m.POOL_PATH, "w", encoding="utf-8"), ensure_ascii=False)
+_good = io.open(m.POOL_PATH, encoding="utf-8").read()
+_ro = m.io.open
+def _deny(p, *a, **k):
+    if os.path.abspath(str(p)) == os.path.abspath(m.POOL_PATH) and (not a or a[0] == "r"):
+        raise PermissionError("对方正在替换")
+    return _ro(p, *a, **k)
+T = table(["| LG-01 | 生效 | 规矩一 | 事一 | 源 |"])   # 回到干净的表，保证这一轮真的有候选要入池（否则下面是空过）
+reset_state()
+_called = {"n": 0}
+_lp = m.load_pool
+def _counting_load_pool():
+    _called["n"] += 1
+    return _lp()
+m.load_pool = _counting_load_pool
+m.io.open = _deny
+try:
+    _lp(); _raised = False
+except OSError:
+    _raised = True
+_rc = m.collect(T, DOCS, False, 24, "fake")
+m.io.open = _ro
+m.load_pool = _lp
+_d = os.path.dirname(m.POOL_PATH)
+ok("M9 池一时读不到（权限／对方正在替换）：load_pool 抛 OSError 不当损坏；collect 真走到了入池这一步、照常收尾、好池原样不动",
+   _raised and _called["n"] >= 1 and _rc == 0 and io.open(m.POOL_PATH, encoding="utf-8").read() == _good
+   and len([f for f in os.listdir(_d) if ".corrupt-" in f]) == 2)  # 只有 M5、M8 那两份，没有新增
 
 n_fail = sum(1 for _, c in results if not c)
 print(f"\n合计 {len(results)} 项，失败 {n_fail} 项")

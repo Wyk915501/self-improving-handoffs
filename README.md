@@ -1,6 +1,6 @@
 # self-improving-handoffs
 
-**Make multi-AI handoffs get better on their own.** A write-time checker for handoff reports, plus a shared "lessons book" that learns from the mistakes AI reviewers catch in each other and rolls them out as one-line rules — with a 48-hour human veto window — plus a report-only scanner for workflow rules (when to write a report vs. edit one).
+**Make multi-AI handoffs get better on their own.** A write-time checker for handoff reports, plus a shared "lessons book" that learns from the mistakes AI reviewers catch in each other and rolls them out as one-line rules — with a 48-hour human veto window — plus a report-only scanner for workflow rules (when to write a report vs. edit one) — with a token-gated adopt button on the decision page.
 
 [![tests](https://github.com/Wyk915501/self-improving-handoffs/actions/workflows/tests.yml/badge.svg)](https://github.com/Wyk915501/self-improving-handoffs/actions/workflows/tests.yml)
 ![python](https://img.shields.io/badge/python-3.10%2B-blue)
@@ -39,7 +39,7 @@ flowchart LR
 ```
 
 1. **Write-time check** (no LLM). Every time an AI writes a handoff report, a hook runs `handoff_gate.py` and checks the file name, front-matter validity, status words, required keys, real timestamps, temp-dir references, links (including backslash links that break on the other machine), and edits to already-frozen reports; index READMEs get their own link check. The reason goes back to *that* AI so it fixes its own report. A periodic scan covers writers that have no hooks.
-2. **Daily learning** (one model call per day). Review reports written by *other* AIs are fed to a model that may only return JSON candidates — it has no file access. **The program then verifies each candidate**: every quote must appear verbatim in the source, evidence must come from ≥2 independent original events, the category must be whitelisted, and it must not duplicate or contradict existing or vetoed rules. Survivors are added as "proposed" and take effect after 48 hours unless you veto them. **Rejected-but-promising candidates are not thrown away**: they go into a rejected-candidate pool, and the decision page shows each one with **Adopt** / **Dismiss** buttons — adopting writes it in as a human-approved rule.
+2. **Daily learning** (one model call per day). Review reports written by *other* AIs are fed to a model that may only return JSON candidates — it has no file access. **The program then verifies each candidate**: every quote must appear verbatim in the source, evidence must come from ≥2 independent original events, the category must be whitelisted, and it must not duplicate or contradict existing or vetoed rules. Survivors are added as "proposed" and take effect after 48 hours unless you veto them. **Rejected-but-promising candidates are not thrown away**: they go into a rejected-candidate pool, and the decision page shows each one with **Adopt** / **Dismiss** buttons — adopting writes it in as a human-approved rule. The adopt link carries a **10-character local token** derived from a per-machine seed plus the candidate's full text: adoptions without the token, with a wrong token, or after the candidate text changed are all rejected.
 3. **Distribution.** Only the currently effective rules (normally ≤15, one line each) are written to a short file that each AI's rules file imports at the start of a session.
 4. **Workflow-rules scan** (no LLM, report-only, new in v5). Machine checks for process rules that live in your own `工作传递/README.md`: W1 canonical docs edited but no report left behind, W2 a report declares a backflow target that never got updated (or is a broken path), W3 a source directory producing a burst of small reports instead of updating one draft. Findings go to a reminder list — it never blocks anyone.
 
@@ -61,10 +61,10 @@ Requirements: Python 3.10+ and `pip install pyyaml` (without it the checker fail
 git clone https://github.com/Wyk915501/self-improving-handoffs
 cd self-improving-handoffs
 pip install pyyaml
-python -X utf8 规范/交接写时门/tests/test_gate.py      # 53 checks
-python -X utf8 规范/交接写时门/tests/test_lessons.py   # 43 checks, fake model, no network
-python -X utf8 规范/交接写时门/tests/test_notify.py    # 55 checks, no popups, no registry
-python -X utf8 规范/交接写时门/tests/test_flow.py      # 8 checks, report-only scanner
+python -X utf8 规范/交接写时门/tests/test_gate.py      # 58 checks
+python -X utf8 规范/交接写时门/tests/test_lessons.py   # 52 checks, fake model, no network
+python -X utf8 规范/交接写时门/tests/test_notify.py    # 75 checks, no popups, no registry
+python -X utf8 规范/交接写时门/tests/test_flow.py      # 20 checks, report-only scanner
 ```
 
 Then follow **[README.zh-CN.md → 十分钟装起来](README.zh-CN.md)**: put the scripts into your docs tree, copy the hook snippet from [`部署样例/`](部署样例/) for your platform, and write one deliberately broken report to confirm the AI gets the failure reason back.
@@ -82,7 +82,7 @@ Both providers go through the same program-side verification, so switching model
 
 ## Validation, honestly
 
-- **159 regression tests** that call the production code, run on Windows and Linux.
+- **205 regression tests** that call the production code, run on Windows and Linux.
 - Ran for about two weeks on one Windows 11 machine (publisher) and one Linux server (checks only).
 - Claude Code hooks were verified to fire on both machines. **The ZCode hook was installed but never verified to fire.**
 - Real daily-learning runs: 26 reports → 0 rules accepted (claude); 23 reports → 1 rule accepted (glm, in effect since); on several later days 1–3 candidates were nominated and all rejected by the program's own checks — which is why v5 added the rejected-candidate pool with one-click adopt.
@@ -95,7 +95,8 @@ This is a working, tested prototype with its limits written down — not a finis
 
 - It is a **post-write hint, not a gate**: it can't stop a write, and it checks format, not whether the content is right.
 - A new rule is free text; the program cannot prove it's only about report-writing. A review report can also cite a real report ID and invent a story around it — the verifier checks that sources *exist*, not that they're *relevant*. The 48-hour veto window is the backstop.
-- The workflow scanner is report-only and young (v0.1): its heuristics (mtime windows, update-record dates) produce reminders, not verdicts; expect false positives and tune before enforcing.
+- The workflow scanner is report-only and young: its heuristics (mtime windows, update-record dates) produce reminders, not verdicts; expect false positives and tune before enforcing.
+- The adopt token stops casual misuse (web pages, fat-fingers, stale scripts), not a program that can read the local state file — that layer is still the 48-hour veto window.
 - Notifications are Windows-only and only visible at the logged-in desktop. There is no off-machine alerting, and if the watchdog itself stops, nothing tells you.
 - Scheduled tasks **must use `pythonw.exe`**. With `python.exe` a console window flashes on every run, and closing it kills the running job (we hit this: exit code `0xC000013A`, no log written).
 - Only one machine may publish (run the daily learning); others just read the effective list.
@@ -104,7 +105,7 @@ This is a working, tested prototype with its limits written down — not a finis
 
 ```
 规范/交接写时门/     the scripts, their detailed docs, and the four test suites
-                    (gate v2.5, lessons v3.6, notify v1.7, flow v0.1)
+                    (gate v2.7, lessons v3.6.2, notify v1.9, flow v0.2.2)
 工作传递/            sample docs tree: report template, a synthetic lessons table,
                      and files the scripts generated from it
 部署样例/            hook snippets (Claude Code, ZCode, Linux), rules-file snippets,
