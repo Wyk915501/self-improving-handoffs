@@ -1,6 +1,6 @@
 # self-improving-handoffs
 
-**Make multi-AI handoffs get better on their own.** A write-time checker for handoff reports, plus a shared "lessons book" that learns from the mistakes AI reviewers catch in each other and rolls them out as one-line rules — with a 48-hour human veto window — plus a report-only scanner for workflow rules (when to write a report vs. edit one) — with a token-gated adopt button on the decision page.
+**Make multi-AI handoffs get better on their own.** A write-time checker for handoff reports, plus a shared "lessons book" that learns from the mistakes AI reviewers catch in each other and rolls them out as one-line rules — with a 48-hour human veto window — plus a report-only scanner for workflow rules (when to write a report vs. edit one), and a token-gated adopt button for salvaging rejected-but-good rule candidates.
 
 [![tests](https://github.com/Wyk915501/self-improving-handoffs/actions/workflows/tests.yml/badge.svg)](https://github.com/Wyk915501/self-improving-handoffs/actions/workflows/tests.yml)
 ![python](https://img.shields.io/badge/python-3.10%2B-blue)
@@ -41,7 +41,7 @@ flowchart LR
 1. **Write-time check** (no LLM). Every time an AI writes a handoff report, a hook runs `handoff_gate.py` and checks the file name, front-matter validity, status words, required keys, real timestamps, temp-dir references, links (including backslash links that break on the other machine), and edits to already-frozen reports; index READMEs get their own link check. The reason goes back to *that* AI so it fixes its own report. A periodic scan covers writers that have no hooks.
 2. **Daily learning** (one model call per day). Review reports written by *other* AIs are fed to a model that may only return JSON candidates — it has no file access. **The program then verifies each candidate**: every quote must appear verbatim in the source, evidence must come from ≥2 independent original events, the category must be whitelisted, and it must not duplicate or contradict existing or vetoed rules. Survivors are added as "proposed" and take effect after 48 hours unless you veto them. **Rejected-but-promising candidates are not thrown away**: they go into a rejected-candidate pool, and the decision page shows each one with **Adopt** / **Dismiss** buttons — adopting writes it in as a human-approved rule. The adopt link carries a **10-character local token** derived from a per-machine seed plus the candidate's full text: adoptions without the token, with a wrong token, or after the candidate text changed are all rejected.
 3. **Distribution.** Only the currently effective rules (normally ≤15, one line each) are written to a short file that each AI's rules file imports at the start of a session.
-4. **Workflow-rules scan** (no LLM, report-only, new in v5). Machine checks for process rules that live in your own `工作传递/README.md`: W1 canonical docs edited but no report left behind, W2 a report declares a backflow target that never got updated (or is a broken path), W3 a source directory producing a burst of small reports instead of updating one draft. Findings go to a reminder list — it never blocks anyone.
+4. **Workflow-rules scan** (no LLM, report-only). Machine checks for process rules that live in your own `工作传递/README.md`: W1 canonical docs edited but no report left behind, W2 a report declares a backflow target that never got updated (or is a broken path), W3 a source directory producing a burst of small reports instead of updating one draft. Findings go to a reminder list — it never blocks anyone.
 
 ## What you actually do
 
@@ -86,7 +86,7 @@ Both providers go through the same program-side verification, so switching model
 - Ran for about two weeks on one Windows 11 machine (publisher) and one Linux server (checks only).
 - Claude Code hooks were verified to fire on both machines. **The ZCode hook was installed but never verified to fire.**
 - Real daily-learning runs: 26 reports → 0 rules accepted (claude); 23 reports → 1 rule accepted (glm, in effect since); on several later days 1–3 candidates were nominated and all rejected by the program's own checks — which is why v5 added the rejected-candidate pool with one-click adopt.
-- The workflow-rules scanner, on its first real run over ~940 existing reports, surfaced 20+ genuine process findings (report fragmentation, broken backflow paths).
+- The workflow-rules scanner, on its first real run over ~940 existing reports, surfaced 20+ genuine process findings (report fragmentation, broken backflow paths). The pool is in production use: the owner has personally adopted 4 rules through the token-gated button. The v6 Windows surface (205 tests, scheduled-task environment, token clicks, URL-protocol chain) was fully re-verified on Windows.
 - Reviewed across several adversarial rounds by other AI reviewers. What each round caught is listed in [`设计要点与审查史.md`](设计要点与审查史.md).
 
 This is a working, tested prototype with its limits written down — not a finished product.
