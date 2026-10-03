@@ -6,9 +6,12 @@
         "hooks": [
           {
             "type": "command",
-            "command": "/usr/bin/python3",
+            "command": "<PYTHON>",
             "args": [
-              "<DOCS>/规范/交接写时门/handoff_gate.py",
+              "-X",
+              "utf8",
+              "-B",
+              "<BIN>/handoff_gate.py",
               "--hook"
             ],
             "timeout": 20,

@@ -6,6 +6,10 @@ handoff_gate.py 的正确行为回归测试（标准库；临时目录；不碰�
 对应 Codex 反例：G01/G02/G04–G11/H02（sil-codex-20260908-01）、V00–V07（sil-codex-20260908-02）
 """
 import io, os, re, sys, json, shutil, tempfile, subprocess, importlib.util
+sys.dont_write_bytecode = True
+os.environ["PYTHONDONTWRITEBYTECODE"] = "1"  # 子进程也不写 __pycache__
+for _k in [k for k in os.environ if k.upper().startswith(("HANDOFF_", "HN_", "HL_"))]:
+    os.environ.pop(_k)  # 继承来的运行目录变量（HANDOFF_HOME 等）会压过下面的临时目录、让测试写进真目录（第十批打包干净检出时发现）
 from datetime import datetime, timezone, timedelta
 
 HERE = os.path.dirname(os.path.abspath(__file__))
@@ -88,7 +92,8 @@ p = w("t5_链接_交接报告.md", fm() + "# 正文\n\n```\n[代码块示例](mi
 r = [x for x in g.check(p) if x.startswith("G6")]
 ok("G07–G11 尖括号/标题/引用式通过、代码块忽略、只报 missing.md", len(r) == 1 and "missing.md" in r[0] and "missing_in_code" not in r[0] and "missing_inline" not in r[0])
 # G7 仅 hook 模式
-p = w("t7_回改冻结件_交接报告.md", fm({"frozen_at": OLD, "observed_at": OBS.replace(OBS[11:13], "%02d" % ((int(OBS[11:13]) - 3) % 24))}) + "# 正文\n")
+# 夹具用时间运算生成（审查：原来对整串做小时数字符串替换，在某些日期时段会把年月日也替换坏、测试必挂）
+p = w("t7_回改冻结件_交接报告.md", fm({"frozen_at": OLD, "observed_at": (now - timedelta(hours=3)).strftime("%Y-%m-%dT%H:%M:%S+08:00")}) + "# 正文\n")
 ok("G7 CLI 模式不报", not any(x.startswith("G7") for x in g.check(p)))
 ok("G7 hook 模式报提示", "G7" in hook_reason(p))
 p_fresh = os.path.join(T, "t1_引号状态_交接报告.md")
@@ -127,7 +132,8 @@ _bak = {}
 try:
     WT = os.path.join(ROOT, "工作传递")
     r = run_hook({"nothing": "here"}, "--hook-strict", "--root", WT)
-    ok("载荷无路径 + 给了 --root：兜底扫到最近改动的坏件", r.returncode == 2 and "件 /" in r.stderr)
+    ok("载荷无路径 + 给了 --root：兜底扫到最近改动的坏件（v2.8 改通知口吻：不一定是你写的、不是你写的别动）",
+       r.returncode == 2 and "件没过写后检查" in r.stderr and "不一定是你写的" in r.stderr)
     ok("兜底一次最多报 3 件", r.stderr.count("交接报告.md：") <= 3)
     r2 = run_hook({"nothing": "here"}, "--hook-strict", "--root", WT)
     ok("兜底 60 秒内限流，不重复全扫", r2.returncode == 0 and not r2.stderr.strip())
@@ -287,6 +293,72 @@ io.open(os.path.join(ZD, "_archive", "README.md"), "w", encoding="utf-8").write(
 citer2 = os.path.join(ROOT, "工作传递", "Y2", "2026-09-21_0903_引用不存在的索引_交接报告.md")
 io.open(citer2, "w", encoding="utf-8", newline="\n").write(fm() + "\n# x\n\n见[索引](../Z/README.md)。\n")
 ok("v2.7-3 只对交接报告放行：_archive/ 里恰好有同名 README 不能让断链过关", any(x.startswith("G6 ") for x in g.check(citer2)))
+
+# ===================== v2.8（2026-10-02 全面审查）回归 =====================
+print("== X1 G8③：规范要求的 _archive/<文件名> 索引链接不报'多带目录前缀'（本机没有 _archive、旧件留原址）==")
+XD = os.path.join(ROOT, "工作传递", "归档线", "claude-code-US3-claude")
+os.makedirs(XD)
+io.open(os.path.join(XD, "2026-09-23_2230_旧件_交接报告.md"), "w", encoding="utf-8").write("x")
+xi = os.path.join(XD, "README.md")
+io.open(xi, "w", encoding="utf-8").write("# 索引\n\n- [旧件](_archive/2026-09-23_2230_旧件_交接报告.md)\n- [坏](claude-code-US3-claude/2026-09-23_2230_旧件_交接报告.md)\n")
+_xp = g.index_problems(xi)
+ok("X1 _archive/ 那条不报；真多带目录前缀的那条照报", len(_xp) == 1 and "目录前缀" in _xp[0] and "_archive" not in _xp[0])
+
+print("== X2 G1 报 YAML 错带文件行号、列号与改法；BOM 明说 ==")
+p = w("x2_冒号值_交接报告.md", fm({"implementation_status": "done: really"}) + "# 正文\n")
+_g1 = [x for x in g.check(p) if x.startswith("G1")]
+ok("X2a 值里含「: 」：G1 指出第几行、给出该行原文与加引号的改法", _g1 and re.search(r"第 \d+ 行第 \d+ 列", _g1[0]) and "加上引号" in _g1[0]
+   and "implementation_status" in _g1[0])
+p = w("x2_bom_交接报告.md", "\ufeff" + fm() + "# 正文\n")
+ok("X2b 文件带 BOM：G1 明说 BOM，不再说'第 1 行是「---」'这种看着矛盾的话", any("BOM" in x for x in g.check(p)))
+
+print("== X3 G4 预盖提示的规则句改对（不得晚于现在），并点出时区换算 ==")
+p = w("x3_预盖_交接报告.md", fm({"frozen_at": (now + timedelta(hours=15)).strftime("%Y-%m-%dT%H:%M:%S+08:00")}) + "# 正文\n")
+_g4 = [x for x in g.check(p) if x.startswith("G4") and "预盖" in x]
+ok("X3 写'不得晚于现在'与'时区'，不再写反成'不得早于'", _g4 and "不得晚于现在" in _g4[0] and "时区" in _g4[0] and "不得早于" not in _g4[0])
+
+print("== X4 G6P：盘符／file:／/root/ 开头的绝对路径链接算不可移植（扫描也不滤）==")
+p = w("x4_绝对路径_交接报告.md", fm() + "# 正文\n\n[本机](C:/Users/someone/Desktop/x.md) [远端](/root/proj/docs/x.md) [好](../x/t1_引号状态_交接报告.md)\n")
+_g6 = [x for x in g.check(p) if x.startswith("G6P")]
+ok("X4 两个绝对路径进 G6P、相对链接不报", _g6 and "2 个链接写的是本机绝对路径" in _g6[0])
+
+print("== X5 G7 用钩子载荷的原件判断：新建不报；改冻结件报；把 status 改回 draft 也照报（原来能绕过）==")
+_orig = fm({"frozen_at": OLD}) + "# 原件\n"
+p = w("x5_冻结件_交接报告.md", fm({"status": "draft", "frozen_at": OLD}) + "# 改成 draft 再改内容\n")
+ok("X5a 原件已冻结 2 小时、新版改成 draft：报 G7 并点明改 status 也算回改",
+   any(x.startswith("G7") and "改成了 draft" in x for x in g.check(p, hook_mode=True, hook_ctx={"created": False, "original": _orig})))
+p = w("x5_新建_交接报告.md", fm({"frozen_at": OLD}) + "# 新建\n")
+_new = g.check(p, hook_mode=True, hook_ctx={"created": True, "original": None})
+ok("X5b 新建文件（type=create）不报 G7；frozen_at 比现在早 2 小时给时区提示", not any(x.startswith("G7") for x in _new)
+   and any(x.startswith("G4（提示）") and "LG-02" in x for x in _new))
+p = w("x5_草稿_交接报告.md", fm({"status": "draft"}) + "# 草稿\n")
+ok("X5c 原件是 draft：不报 G7", not any(x.startswith("G7") for x in g.check(p, hook_mode=True, hook_ctx={"created": False, "original": fm({"status": "draft"})})))
+
+print("== X6 钩子抬头按问题类型说话 ==")
+p = w("x6_冻结件回改_交接报告.md", fm({"frozen_at": OLD, "observed_at": (now - timedelta(hours=3)).strftime("%Y-%m-%dT%H:%M:%S+08:00")}) + "# 正文\n")
+r = run_hook({"tool_name": "Edit", "tool_input": {"file_path": p}, "tool_response": {"filePath": p, "originalFile": fm({"frozen_at": OLD}) + "# 原件\n"}}, "--hook")
+_j = json.loads(r.stdout) if r.stdout.strip() else {}
+ok("X6a 改冻结件：抬头说'不要就地改内容'、不说'请就地修正'；只有提示时 systemMessage 写'提示'",
+   "不要就地改内容" in _j.get("reason", "") and "请就地修正" not in _j.get("reason", "") and "提示" in _j.get("systemMessage", ""))
+r = run_hook({"tool_input": {"file_path": xi}}, "--hook")
+ok("X6b 写索引 README：抬头叫'索引链接检查'", "索引链接检查" in (json.loads(r.stdout)["reason"] if r.stdout.strip() else ""))
+
+print("== X7 载荷深搜跳过 Claude Code 的驼峰正文字段（structuredPatch 里出现别件路径不劫持）==")
+bad7 = w("x7_别人的坏件_交接报告.md", "不是 frontmatter\n")
+other = os.path.join(ROOT, "普通文件.txt")
+io.open(other, "w", encoding="utf-8").write("x")
+r = run_hook({"tool_name": "Edit", "tool_input": {"file_path": other},
+              "tool_response": {"filePath": other, "structuredPatch": [{"lines": [" " + bad7]}], "newString": bad7}}, "--hook")
+ok("X7 改的是普通文件：不因补丁正文里的报告路径去查别人的件", not r.stdout.strip())
+
+print("== X8 链接写成 //主机/共享 这类远程路径：不去碰文件系统（会去连 SMB），直接当不可移植的绝对路径报（复核 R2-2-2）==")
+import time as _tm
+p = w("x8_远程路径_交接报告.md", fm() + "# 正文\n\n[远程](//192.0.2.1/s/x.md) [编码过的](%2F%2F192.0.2.3/s/x.md)\n")
+_t0 = _tm.time()
+_g8 = g.check(p)
+ok("X8 两个远程链接进 G6P、不报成断链，而且没有等网络（< 0.5 秒）",
+   any(x.startswith("G6P") and "2 个链接写的是本机绝对路径" in x for x in _g8) and not any(x.startswith("G6 ") for x in _g8)
+   and _tm.time() - _t0 < 0.5)
 
 n_fail = sum(1 for _, c in results if not c)
 print(f"\n合计 {len(results)} 项，失败 {n_fail} 项")

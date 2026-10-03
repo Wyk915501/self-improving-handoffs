@@ -2,6 +2,12 @@
 # -*- coding: utf-8 -*-
 """
 handoff_gate.py —— 交接报告写后检查（零 LLM，机械核验）
+v2.8 · 2026-10-02 · 全面审查修七处：①G8③ 不再把规范要求的 `_archive/<文件名>` 索引链接报成"多带目录前缀"
+    （本机没有 _archive、旧件留原址，照提示改会把 US3 那边的链接改断）；②钩子抬头按问题类型说话：冻结件不叫你
+    "就地修正"，只有 G7 时写"提示"；③G1 报 YAML 错带文件行号、列号与改法，认得出 BOM；④G4 预盖提示的规则句
+    写反了（"不得早于"→"不得晚于"），并点出时区换算这个常见成因；⑤G6P 把盘符、file:、/root/ 开头的绝对路径链接
+    也算不可移植；⑥G7 用钩子载荷里的原件判断：改的是已冻结件就提示，哪怕新版把 status 改回 draft（原来能绕过）；
+    新建文件不报 G7；⑦兜底扫描（ZCode）改成通知口吻——那些件不一定是当前窗口写的。载荷深搜补跳过驼峰正文字段。
 v2.7 · 2026-09-21 · fable 复验：G6 链接目标不在原址但同目录 _archive/ 下有同名件＝已归档，放行；克隆路线旧件可直接搬走不留跳转件
 v2.6 · 2026-09-21 · is_target 排除 _archive/（fable 09-21 评估：克隆-调整-归档的落地前提——归档旧件相对链接深一层必断、冻结件没人能修，会永久挂清单）。检查逻辑零变化，只是范围口径与 is_index 对齐。
 （v2.5 · 2026-09-09 · 按 GLM 二轮复核：G6 反斜杠项改编号 G6P（扫描/清单只滤 G6 断链、不滤 G6P）；G6/G8 文件名含 # 先整体查；
@@ -34,8 +40,9 @@ Bash/同步/Codex 等其他写入来源——消费方在读新件、更新索�
   G6 相对 markdown 链接可解析到实存文件（支持 <尖括号目标>、带标题、引用式定义；跳过围栏代码与行内代码）
      只证明"本机存在"，不证明另一台机器可达；扫描与清单会滤掉这一类（跨机假断链）。文件名含 # 的先整体查存在
   G6P 链接目标含反斜杠：即使本机能解析也报（另一台机器必断，一律用正斜杠）；扫描与清单**不**过滤本项
-  G7（仅 hook 模式，提示性）本次写入的是 frozen_at 已过 30 分钟的 ready_for_review 件 → 提示"冻结件不回改"
-     它按 frozen_at 年龄判断，不证明冻结历史，也抓不到改过 frozen_at 的回改
+  G7（仅 hook 模式，提示性）改的是已冻结件（原件 ready_for_review 且 frozen_at 已过 30 分钟）→ 提示"冻结件不回改"
+     Claude Code 载荷带原件（tool_response.originalFile）时按原件判，新版把 status 改回 draft 也照报；新建文件不报；
+     载荷里没有原件的宿主退回按新版的 frozen_at 年龄判（抓不到改过 frozen_at 的回改）
   G0 文件名含反斜杠（Windows 分隔符混进 Linux 文件名，文件没进目录、索引找不到）
   G8（只对 工作传递/**/README.md 索引；不套 G1–G7）保守检查 markdown 链接：①解释合法标点转义后，文件路径仍含反斜杠；
      ②目标是同目录裸文件名（不含 / 与 ..）但本机当前不存在（与目录清单逐字比对，大小写不同也算不存在，NTFS 下不靠 exists）；
@@ -59,6 +66,12 @@ try:
 except Exception:  # pragma: no cover
     yaml = None
 
+sys.dont_write_bytecode = True  # 不在正本目录（docs 同步域）里留 __pycache__
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+import handoff_common as C  # noqa: E402
+
+VERSION = "2.8"
+
 BUILTIN_KEYS = [
     "title","scope","task","type","status","workflow_profile","contract_ref","contract_revision",
     "contract_sha256","contract_mode","revision","report_id","batch_id","concern_id","effect_id",
@@ -69,9 +82,9 @@ BUILTIN_KEYS = [
     "full_contract_finalize",
 ]
 CONDITIONAL = {"full_contract_finalize": ("workflow_profile", "multi-ai-loop/v1")}
-TOOLS_DIR = os.environ.get("HANDOFF_TOOLS_DIR") or os.path.join(os.path.expanduser("~"), ".claude", "tools")  # 测试用 HANDOFF_TOOLS_DIR 指到临时目录，不碰真实家目录
-SCAN_STAMP = os.path.join(TOOLS_DIR, "handoff_gate_lastscan")
-SCAN_SEEN = os.path.join(TOOLS_DIR, "handoff_gate_reported.json")
+TOOLS_DIR = C.P.home  # 运行态目录由 handoff_common 统一解析（测试用 HANDOFF_TOOLS_DIR 指到临时目录）
+SCAN_STAMP = C.P.gate_lastscan
+SCAN_SEEN = C.P.gate_reported
 FALLBACK_MINUTES = 15       # 载荷里找不到路径时，回退扫描"最近改动"的窗口
 FALLBACK_MIN_INTERVAL = 60  # 回退扫描最短间隔（秒），避免每次工具调用都全扫
 FALLBACK_MAX_FILES = 3      # 一次最多报几件，避免一次吐一墙别人的历史文件
@@ -157,6 +170,8 @@ def _strip_quotes(v):
 def parse_front(text):
     """返回 (keys, data:dict, errors:list)。errors 含 G1 级问题；YAML 解析失败时 data 为空。"""
     lines = text.split("\n")
+    if lines and lines[0].startswith("\ufeff"):
+        return [], {}, ["G1 文件开头带 BOM（字节顺序标记，多半是 PowerShell 5 的 Out-File 写的）：标准解析器认不出 frontmatter——用 UTF-8（无 BOM）重存"]
     if not lines or lines[0].strip() != "---":
         first = (lines[0] if lines else "")[:40]
         return [], {}, [f"G1 frontmatter 不在第 1 行（第 1 行是「{first}」）——标准解析器读不到任何字段"]
@@ -179,8 +194,14 @@ def parse_front(text):
     try:
         loaded = yaml.load(block, Loader=_StrictLoader)
     except Exception as e:  # YAMLError、重复键 ConstructorError、坏日期 ValueError 等一并 fail-closed
-        msg = str(e).split("\n")[0][:120]
-        return [], {}, [f"G1 frontmatter 无法解析（{type(e).__name__}）：{msg}"]
+        mark = getattr(e, "problem_mark", None) or getattr(e, "context_mark", None)
+        problem = (getattr(e, "problem", None) or str(e).split("\n")[0])[:80]
+        if mark is not None:
+            fl = mark.line + 2  # frontmatter 第 0 行是文件第 2 行
+            src = lines[fl - 1].strip()[:40] if 0 < fl <= len(lines) else ""
+            return [], {}, [f"G1 frontmatter 第 {fl} 行第 {mark.column + 1} 列无法解析（{type(e).__name__}：{problem}）："
+                            f"「{src}」——值里含「: 」或以 [ {{ # 开头的，请把整个值加上引号"]
+        return [], {}, [f"G1 frontmatter 无法解析（{type(e).__name__}）：{problem}"]
     if not isinstance(loaded, dict):
         return [], {}, ["G1 frontmatter 顶层不是键值映射"]
     return list(loaded.keys()), loaded, []
@@ -270,7 +291,21 @@ def name_problems(base_name):
     return out
 
 
-def check(path, hook_mode=False):
+def _orig_frozen(original):
+    """钩子载荷里的原件全文 → (原件是否已冻结, 冻结时刻)。读不出返回 (False, None)。"""
+    if not isinstance(original, str) or not original.strip():
+        return False, None
+    try:
+        _, kv, err = parse_front(original)
+    except Exception:
+        return False, None
+    if err:
+        return False, None
+    return sval(kv.get("status")) == "ready_for_review", parse_dt(kv.get("frozen_at"))
+
+
+def check(path, hook_mode=False, hook_ctx=None):
+    """hook_ctx：钩子载荷里的写入上下文 {"created": bool, "original": 原件全文或 None}（Claude Code 的 Write/Edit 结果带这两样）。"""
     probs = list(name_problems(os.path.basename(path)))
     try:
         with io.open(path, encoding="utf-8", errors="replace") as f:
@@ -305,7 +340,8 @@ def check(path, hook_mode=False):
         if fz is None:
             probs.append(f"G4 ready_for_review 但 frozen_at=「{sval(kv.get('frozen_at'))}」不是带时区偏移的时间")
         elif fz - now > timedelta(seconds=60):
-            probs.append(f"G4 frozen_at {fz.isoformat()} 比现在晚 {int((fz - now).total_seconds())} 秒——预盖；冻结时刻不得早于实际落盘")
+            probs.append(f"G4 frozen_at {fz.isoformat()} 比现在晚 {int((fz - now).total_seconds())} 秒——预盖；冻结时刻写实际落盘的时刻，"
+                         f"不得晚于现在。常见原因是时区换算错（本机时钟不是北京时间；见 LG-02）")
         if ob is None:
             probs.append(f"G4 observed_at=「{sval(kv.get('observed_at'))}」不是带时区偏移的时间")
         else:
@@ -313,7 +349,18 @@ def check(path, hook_mode=False):
                 probs.append(f"G4 observed_at {ob.isoformat()} 在未来")
             if fz is not None and ob > fz:
                 probs.append(f"G4 observed_at 晚于 frozen_at（{ob.isoformat()} > {fz.isoformat()}）——观测不可能发生在冻结之后")
-        if hook_mode and fz is not None and now - fz > timedelta(minutes=FROZEN_REWRITE_MIN):
+    ctx = hook_ctx or {}
+    if hook_mode and ctx.get("created"):
+        if st == "ready_for_review" and fz is not None and now - fz > timedelta(hours=2):
+            probs.append(f"G4（提示）新建的冻结件 frozen_at 比现在早 {int((now - fz).total_seconds() // 3600)} 小时——冻结时刻应写实际落盘时刻；"
+                         f"多半是读了本机时钟（不是北京时间）却标了 +08:00，见 LG-02")
+    elif hook_mode:
+        was_frozen, ofz = _orig_frozen(ctx.get("original"))
+        if ctx.get("original") is not None and was_frozen and ofz is not None and now - ofz > timedelta(minutes=FROZEN_REWRITE_MIN):
+            mins = int((now - ofz).total_seconds() // 60)
+            flip = "（新版把 status 改成了 draft，也算回改）" if st != "ready_for_review" else ""
+            probs.append(f"G7（提示）改的是已冻结 {mins} 分钟的 ready_for_review 件{flip}——冻结件不回改，要改请另写前向更正件并在索引 disposition 指过去")
+        elif ctx.get("original") is None and st == "ready_for_review" and fz is not None and now - fz > timedelta(minutes=FROZEN_REWRITE_MIN):
             mins = int((now - fz).total_seconds() // 60)
             probs.append(f"G7（提示）本次写入的是 frozen_at 已过 {mins} 分钟的 ready_for_review 件——冻结件不回改，要改请另写前向更正件并在索引 disposition 指过去。本项只按 frozen_at 年龄判断，不证明冻结历史")
 
@@ -322,11 +369,19 @@ def check(path, hook_mode=False):
         probs.append(f"G5 引用了会话临时目录（复核方打不开），行 {', '.join(map(str, hits[:8]))}{' …' if len(hits) > 8 else ''}；把文件落进仓内改相对链接，或同行加 gate:allow-temp 标明只是举证")
 
     base = os.path.dirname(os.path.abspath(path))
-    broken, nonportable = [], []
+    broken, nonportable, absolute = [], [], []
     for tgt in scan_links(text):
         if tgt.startswith(("http://", "https://", "mailto:", "#", "data:")):
             continue
         whole = unquote(tgt)
+        if C.is_remote_path(whole):
+            # //主机/共享 这类：一碰文件系统就去连 SMB（复核 R2-2-2），不查存在，直接当不可移植的绝对路径报
+            absolute.append(whole.split("#", 1)[0])
+            continue
+        if re.match(r"^(?:[A-Za-z]:[/\\]|file:|/root/|/home/|~/)", whole):
+            # 写入端能打开、另一台机器打不开；扫描时 G6 又被当跨机不对称滤掉——两边都不报（审查 G6-ABS），单列成不可移植
+            absolute.append(whole.split("#", 1)[0])
+            continue
         if "\\" in whole.split("#", 1)[0]:
             # Windows 上 os.path.join 认反斜杠、本机能解析，同步到 Linux 就断——不可移植，单独报（GLM 09-09）
             nonportable.append(unquote(tgt.rsplit("#", 1)[0]) if "#" in tgt else whole)  # 报文件路径部分，不带锚点
@@ -350,6 +405,8 @@ def check(path, hook_mode=False):
             broken.append(whole)  # 报原文，不报剥过锚点的串（GLM 09-09 三轮）
     if nonportable:
         probs.append(f"G6P {len(nonportable)} 个链接目标含反斜杠「\\」（本机 Windows 能解析，另一台机器上必断；一律用正斜杠；扫描与清单不过滤本项）：{'；'.join(nonportable[:5])}{' …' if len(nonportable) > 5 else ''}")
+    if absolute:
+        probs.append(f"G6P {len(absolute)} 个链接写的是本机绝对路径（盘符、file:、/root/、~/ 开头；复核方那台机器打不开，违反 LG-06）——改成仓内相对路径：{'；'.join(x[:60] for x in absolute[:3])}{' …' if len(absolute) > 3 else ''}")
     if broken:
         probs.append(f"G6 {len(broken)} 个链接在本机解析不到文件：{'；'.join(broken[:5])}{' …' if len(broken) > 5 else ''}（本机存在也不证明对方机器可达）")
     return probs
@@ -405,6 +462,10 @@ def index_problems(path, hook_mode=False):
         if "/" in t:
             # ③ 同根因的另一种拼写（GLM 09-09）：写成 `claude-code/文件` 而 README 自己就在 claude-code/ 里，
             #    解析成 claude-code/claude-code/文件 必断。只在"整体不存在、但最后一段裸名就在同目录"时报，误报面极窄
+            if t.split("/", 1)[0] == "_archive":
+                # 规范要求归档后索引行写 `_archive/<文件名>`；_archive 不跨机同步、旧件在对端留在原址——本机找不到
+                # 是跨机不对称，不是多带了前缀，照"只写裸文件名"去改反而会把对端的链接改断（审查 G8-ARCHIVE）
+                continue
             last = t.rsplit("/", 1)[-1]
             if last and last in siblings and not exists_exact(base, t):
                 prefixed.append(tgt)
@@ -498,7 +559,8 @@ def todo_md(root, findings, out_path, hours, writer=None):
         return None
 
 
-BODY_KEYS = {"content", "new_string", "old_string", "new_str", "old_str", "text", "body", "edits"}  # 载荷里的正文字段，深搜不进
+BODY_KEYS = {"content", "new_string", "old_string", "new_str", "old_str", "text", "body", "edits",
+             "oldString", "newString", "originalFile", "structuredPatch", "contentNotInModelContext"}  # 载荷里的正文字段（含 Claude Code 的驼峰名），深搜不进
 
 
 def find_target_in(obj, depth=0):
@@ -649,15 +711,16 @@ def main(argv):
             data = json.load(sys.stdin)
         except Exception:
             data = {}
-        path = ""
+        path, ctx = "", {}
         if isinstance(data, dict):
             ti = data.get("tool_input")
+            tr = data.get("tool_response")
             if isinstance(ti, dict):
                 path = ti.get("file_path") or ""
-            if not path:
-                tr = data.get("tool_response")
-                if isinstance(tr, dict):
-                    path = tr.get("filePath") or ""
+            if isinstance(tr, dict):
+                path = path or tr.get("filePath") or ""
+                # Claude Code 的 Write 结果带 type=create/update 与 originalFile（原件全文）；Edit 结果带 originalFile（有时为空）
+                ctx = {"created": tr.get("type") == "create", "original": tr.get("originalFile")}
         if path and not (os.path.isfile(path) and is_target(path)):
             path = ""
         if not path:
@@ -670,17 +733,35 @@ def main(argv):
             probs = index_problems(ipath, hook_mode=True)
             if probs:
                 findings = [(os.path.abspath(ipath), probs)]
+        mode = "report"
+        if ipath:
+            mode = "index"
         elif path:
-            probs = check(path, hook_mode=True)
+            probs = check(path, hook_mode=True, hook_ctx=ctx)
             if probs:
                 findings = [(os.path.abspath(path), probs)]
         elif root_arg:
             findings = fallback_scan(guess_root(root_arg))
+            mode = "fallback"
         if not findings:
             return 0
         n = sum(len(pr) for _, pr in findings)
-        head = (f"交接报告写后检查未通过（{n} 处；文件已写入，请就地修正后再交出）：" if len(findings) == 1
-                else f"交接报告写后检查未通过（{len(findings)} 件 / {n} 处；文件已写入，请就地修正后再交出）：")
+        allp = [x for _, pr in findings for x in pr]
+        only_hint = all("（提示）" in x for x in allp)
+        frozen = any(x.startswith("G7") for x in allp)
+        if mode == "index":
+            head = f"索引链接检查未通过（{n} 处；只改链接写法，不动登记内容）："
+        elif mode == "fallback":
+            head = (f"近 {FALLBACK_MINUTES} 分钟别处写入的交接报告有 {len(findings)} 件没过写后检查（{n} 处）——不一定是你写的："
+                    "是你写的 draft 就地改；不是你写的别动，交给来源方（清单见 写后检查-待处理.md）；已冻结的不回改：")
+        elif frozen:
+            head = (f"写后检查：这份是已冻结的交接报告（{n} 处）——不要就地改内容，要改请另写前向更正件并在索引 disposition 指过去；"
+                    "其余格式问题待负责人定规则前先不动，下一份别再犯：")
+        elif only_hint:
+            head = f"写后检查提示（{n} 处，不是不合格，看一眼）："
+        else:
+            head = (f"交接报告写后检查未通过（{n} 处；文件已写入，请就地修正后再交出）：" if len(findings) == 1
+                    else f"交接报告写后检查未通过（{len(findings)} 件 / {n} 处；文件已写入，请就地修正后再交出）：")
         body = []
         for p, probs in findings:
             if len(findings) > 1:
@@ -693,8 +774,9 @@ def main(argv):
         print(json.dumps({
             "decision": "block",
             "reason": reason,
-            "systemMessage": (f"写后检查：{os.path.basename(findings[0][0])} {n} 处不合格" if len(findings) == 1
-                              else f"写后检查：{len(findings)} 件 {n} 处不合格"),
+            "systemMessage": ((f"写后检查提示：{os.path.basename(findings[0][0])} {n} 处" if only_hint else
+                               f"写后检查：{os.path.basename(findings[0][0])} {n} 处不合格") if len(findings) == 1
+                              else f"写后检查：{len(findings)} 件 {n} 处" + ("提示" if only_hint else "不合格")),
         }, ensure_ascii=False))
         return 0
 
