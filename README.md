@@ -84,10 +84,11 @@ Why through Claude Code: Zhipu's terms say the GLM Coding Plan may only be used 
 
 ## Validation, honestly
 
-- **530 regression tests** in six suites, all calling the production code, run on Windows (Python 3.14 and 3.12); CI runs them on Linux and Windows with Python 3.10 and 3.12. The toast XML is round-tripped through Windows' own XML parser in a dry run; that part is skipped (reported as SKIP, not PASS) where Windows notification components are unavailable.
+- **570 regression tests** in six suites, all calling the production code, run on Windows (Python 3.14 and 3.12); CI runs them on Linux and Windows with Python 3.10 and 3.12. The toast XML is round-tripped through Windows' own XML parser in a dry run; that part is skipped (reported as SKIP, not PASS) where Windows notification components are unavailable.
 - In daily use since 2026-09-08 on one Windows 11 machine (publisher) and one Linux server (checks only). The original owner adopted 20+ candidates through the decision page; 30+ rules are in effect.
 - Claude Code hooks were verified to fire on both machines. **The ZCode hook was installed but never verified to fire.**
-- v7 is the result of a full audit (50 findings, two independent re-review rounds) plus an adversarial multi-agent review of the new notification and page code. **The v7 toasts and decision page have not yet been clicked through on a real desktop**, and the Claude-Code-based GLM transport has had one real dry run (real model call, no writes) before release.
+- v7 was the result of a full audit (50 findings, two independent re-review rounds) plus an adversarial multi-agent review of the new notification and page code. v8 (2026-10-04) closes that review's leftovers: model-call timeouts now kill the whole process tree (by PID, never by name), one notice that credited the owner with someone else's change is fixed, and previously unguarded code got tests — each proven by deliberately breaking the code (63 mutations over four rounds — all caught on Windows except one that only Linux/macOS can exercise, which CI runs). It went through two independent review rounds (no must-fix findings; every should-fix was addressed — one of them a regression that a first-round fix had introduced).
+- Since v7 went live on the original machine (2026-10-03), the scheduled checks have run on time and the decision page is regenerated as designed; nothing needed the owner's attention, so **only a self-test toast has been shown and the decision page's buttons have not yet been clicked by a human**. The Claude-Code-based GLM transport has done one real daily run (two batches, backlog cleared).
 - What each review round caught is listed in [`设计要点与审查史.md`](设计要点与审查史.md).
 
 This is a working, tested prototype with its limits written down — not a finished product.
@@ -106,7 +107,7 @@ This is a working, tested prototype with its limits written down — not a finis
 
 ```
 规范/交接写时门/     the scripts, their detailed docs, the operations skill, and the six test suites
-                    (gate v2.8, lessons v3.9, notify v1.13, flow v0.3, handoffctl, handoff_common)
+                    (gate v2.8, lessons v3.10, notify v1.14, flow v0.3, handoffctl, handoff_common)
 工作传递/            sample docs tree: report template, a synthetic lessons table,
                      and files the scripts generated from it
 部署样例/            hook snippets (Claude Code, ZCode, Linux), rules-file snippets, cron example

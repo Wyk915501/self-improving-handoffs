@@ -247,6 +247,16 @@ _t0 = _tm.time()
 _, o21 = scan_out()
 ok("T21 报成回流目标不存在，而且没有等网络（< 2 秒）", "192.0.2.1" in o21 and "不存在" in o21 and _tm.time() - _t0 < 2)
 
+print("== T21b 回流路径写成 NT 直通前缀 \\??\\UNC\\主机\\共享（或 /??/UNC/…，Windows 的 normpath 会改写成它）：同样当远程路径，不碰文件系统（复核 RA-1）==")
+_nt21 = ["\\??\\UNC\\192.0.2.3\\s\\x.md", "/??/UNC/192.0.2.4/s/x.md", "%5C%3F%3F%5CUNC%5C192.0.2.5%5Cs%5Cx.md"]
+_rp21 = os.path.join(DOCS, "工作传递", "U", "codex", "x_交接报告.md")
+ok("T21b 三种写法都认成远程路径；生成的候选落点里一个远程路径都没有",
+   all(m.C.is_remote_path(v) for v in _nt21)
+   and not any(m.C.is_remote_path(c) or "192.0.2." in c for v in _nt21 for c in m.candidates(v, _rp21, DOCS, os.path.dirname(DOCS), {})))
+_det21 = ["/./??/UNC/192.0.2.6/s/x.md", "/x/../??/UNC/192.0.2.7/s/x.md"]  # 绕一下：第一道判断看不出，normpath 化简后才成 \??\UNC\…
+ok("T21c 绕一下的写法（/./??/UNC/…、/x/../??/UNC/…）：化简之后再判一次，候选落点里同样没有远程路径（复核 RA-1）",
+   not any(m.C.is_remote_path(c) or "192.0.2." in c for v in _det21 for c in m.candidates(v, _rp21, DOCS, os.path.dirname(DOCS), {})))
+
 n_fail = sum(1 for _, c in results if not c)
 print(f"\n合计 {len(results)} 项，失败 {n_fail} 项")
 shutil.rmtree(ROOT, ignore_errors=True)

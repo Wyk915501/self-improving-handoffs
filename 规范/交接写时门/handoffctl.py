@@ -704,6 +704,19 @@ def _table_view():
 _BAD_BYTES = "教训表或否决记录里有不是 UTF-8 的坏字节（多半是用 PowerShell 的 Set-Content／Add-Content 写过）"
 
 
+def _claude_check(exe):
+    """doctor 的「Claude Code」一项（纯函数，便于测）。找不到 → ✗；npm 垫片旁边有 claude.exe → 直接用它，✓；
+    只有垫片 → !：要经 cmd.exe 转一道，参数的转义规则不同、出了错难查（超时已由 _run_tree 连同子进程一起结束，
+    第十一批起不再是"杀不到"；复核 R2-2-6）。返回 (级别, 说明)。"""
+    if not exe:
+        return "✗", "找不到 claude：装好 Claude Code，或在 config.json 的 lessons.claude_exe 写明路径"
+    real = _lessons()._resolve_exe(exe)
+    if real.lower().endswith((".cmd", ".bat")):
+        return "!", (real + "——是 npm 之类的垫片、旁边没找到 claude.exe：每次调用要经 cmd.exe 转一道，"
+                     "参数的转义规则不同、出错难查；在 config.json 的 lessons.claude_exe 写 claude.exe 的完整路径")
+    return "✓", real
+
+
 def _hb_check(ns, now):
     """doctor 的「看门狗最近一轮」：只认计划任务那一轮（common.task_heartbeat）；4 小时一轮，跳过一轮也不误报。返回 (级别, 说明)。"""
     lc_at = C.to_bj(C.task_heartbeat(ns).get("utc"))
@@ -835,13 +848,8 @@ def cmd_doctor(args):
             has_key = bool(os.environ.get("GLM_API_KEY"))
         chk("✓" if has_key else "✗", "GLM_API_KEY（用户环境变量）", "有（不显示值）" if has_key else "没有：每日学习调不了模型")
         if C.cfg("lessons", "glm_via", "claude-code") == "claude-code":
-            exe = C.cfg("lessons", "claude_exe", "") or shutil.which("claude")
-            real = _lessons()._resolve_exe(exe) if exe else None
-            shim = bool(real) and real.lower().endswith((".cmd", ".bat"))  # 认不出垫片旁的 claude.exe：超时杀不到它（R2-2-6）
-            chk("✗" if not exe else ("!" if shim else "✓"), "Claude Code（每日学习经它调 GLM，智谱 Coding Plan 只能在官方支持的工具里用）",
-                (real + ("——是 npm 之类的垫片、旁边没找到 claude.exe：调用超时时可能杀不到真正的进程，"
-                         "在 config.json 的 lessons.claude_exe 写 claude.exe 的完整路径" if shim else "")) if exe
-                else "找不到 claude：装好 Claude Code，或在 config.json 的 lessons.claude_exe 写明路径")
+            lvl, det = _claude_check(C.cfg("lessons", "claude_exe", "") or shutil.which("claude"))
+            chk(lvl, "Claude Code（每日学习经它调 GLM，智谱 Coding Plan 只能在官方支持的工具里用）", det)
         else:
             chk("!", "GLM 调用方式", "直连按量计费的标准端点（花账户余额）；默认应是经 Claude Code（lessons.glm_via=claude-code）")
     for name, p, key in (("Claude Code 写后检查钩子", os.path.join(project_root(), ".claude", "settings.local.json"), "handoff_gate.py"),

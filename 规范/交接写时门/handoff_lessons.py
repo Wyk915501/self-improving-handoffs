@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-handoff_lessons.py —— 协作教训表的无人值守维护（v3.9 · 2026-10-02）
+handoff_lessons.py —— 协作教训表的无人值守维护（v3.10 · 2026-10-03）
 
 现在怎么运转（负责人 09-29 定：默认直接生效、弹窗简述改动、不合理才点进去否决）
   daily  唯一的定时入口：加锁 → collect → promote → pool-adopt → publish → 解锁；一步失败不拦后面的步骤，退出码取最大值
@@ -21,6 +21,7 @@ handoff_lessons.py —— 协作教训表的无人值守维护（v3.9 · 2026-10
 模型调用：--provider glm（默认）经 Claude Code 调智谱 glm-5.3，用 Coding Plan 订阅额度（智谱规定订阅只能在官方支持的
   工具里用，自写脚本直连 coding 端点不合规——配置里出现 /api/coding/ 一律拒绝）；lessons.glm_via=api 时自写脚本直连
   按量计费的标准端点（花余额）。--provider claude 调本机 claude CLI（默认 sonnet，功率 max——负责人 10-02 要求）。
+  两种都经 _run_tree 起子进程：超时就按进程号结束自己起的整棵进程树，不干等、不留孤儿（10-03 第十一批）。
   模型输出坏 JSON：先本地修复（未转义引号、尾逗号）→ 再让便宜模型只修语法 → 仍失败把原文存 logs/raw/、下轮批量减半；
   同一件连续 3 次跟着失败就跳过它，不再无限重烧。
 
@@ -38,14 +39,14 @@ handoff_lessons.py —— 协作教训表的无人值守维护（v3.9 · 2026-10
   兜底：注入形态硬拦 ＋ 每条新规矩当天简述弹窗 ＋ 处理页「不采纳」随时撤（撤了当场重发布）。
 历史版本说明见 README「更新记录」。
 """
-import io, json, os, re, sys, glob, shutil, subprocess, tempfile, time, uuid, urllib.request, urllib.error
+import io, json, os, re, sys, glob, shutil, signal, subprocess, tempfile, time, uuid, urllib.request, urllib.error
 from datetime import datetime, timezone, timedelta
 
 sys.dont_write_bytecode = True  # 不在正本目录（docs 同步域）里留 __pycache__
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import handoff_common as C  # noqa: E402
 
-VERSION = "3.9"
+VERSION = "3.10"
 BJ = C.BJ
 NO_WINDOW = C.NO_WINDOW
 TOOLS = C.P.home
@@ -58,7 +59,7 @@ SOURCES, CATEGORIES, OUT_OF_SCOPE, INJECTION = C.SOURCES, C.CATEGORIES, C.OUT_OF
 PEND_FULL, ROW_PAT = C.PEND_FULL, C.ROW_PAT
 ADDED_PAT = C.ADDED_ANY
 FM_KEY = C.FM_KEY
-MIN_WAIT = timedelta(hours=47, minutes=59)  # 只用于遗留的标准拟生效行
+MIN_WAIT = C.PENDING_MIN_WAIT  # 只用于遗留的标准拟生效行；看门狗与表体检按 common.pending_blocker 同一口径（复核 RA-8）
 
 _L = lambda k: C.cfg("lessons", k)
 DAILY_CAP, DAILY_CAP_ALL, TOTAL_CAP = int(_L("daily_cap")), int(_L("daily_cap_all")), int(_L("total_cap"))
@@ -630,7 +631,10 @@ def publish(path, _retry=False):
     text = "\n".join(out)
     # 第 5 行（下标 4）是带时刻的版本行，正文比对时跳过它，否则跨分钟必重写；但凭证（两个哈希）必须是现在的
     if os.path.isfile(dst):
-        old = read(dst)
+        try:
+            old = read(dst)
+        except UnicodeDecodeError:  # 旧生效版混进了坏字节：它是程序生成的，直接重写（复核 RA-5）
+            old = ""
         if old.split("\n")[5:] == text.split("\n")[5:] and f"表哈希 {h8} · 否决哈希 {vh}" in old:
             print(f"publish: 内容与凭证均未变（{len(live)} 条），不重写")
             return 0
@@ -931,14 +935,14 @@ def call_model_glm_text(prompt, model=None):
 def call_model_glm(prompt, model=None):
     txt, _ = call_model_glm_text(prompt, model)
     try:
-        return parse_model_json(txt)
+        return _shaped(parse_model_json(txt))
     except ModelOutputError as e:
         print(f"! 模型输出解析失败（{e}），请便宜模型只修语法再试一次")
         fix_prompt = ("下面是一段本应是 JSON 的文本，有语法错误（多半是字符串里的英文双引号没转义）。"
                       "请只修语法、不改任何文字内容，字符串里的英文双引号改成「」，只输出修好的 JSON：\n\n" + txt)
         try:
             txt2, _ = call_model_glm_text(fix_prompt, C.cfg("lessons", "glm_repair_model", "glm-5.3-flash"))
-            return parse_model_json(txt2)
+            return _shaped(parse_model_json(txt2))
         except Exception as e2:
             raise ModelOutputError(f"{e}；修复也失败：{e2}", txt)
 
@@ -963,6 +967,77 @@ def _claude_exe():
 
 
 _DEADLINE = [None]  # daily 开跑时按计划任务的运行上限算出的截止时刻：单次模型调用不超过剩下的时间（复核 C-07）
+
+
+def _kill_tree(p):
+    """只结束自己起的这个子进程和它的子孙：按进程号，不按名字（本机同时开着别的会话与它们的钩子）。"""
+    try:
+        if os.name == "nt":
+            subprocess.run(["taskkill", "/PID", str(p.pid), "/T", "/F"], stdout=subprocess.DEVNULL,
+                           stderr=subprocess.DEVNULL, timeout=30, creationflags=NO_WINDOW)
+        else:
+            os.killpg(p.pid, signal.SIGKILL)  # 起子进程时已让它自成一组（start_new_session）
+    except Exception:
+        pass
+    try:
+        p.kill()
+    except Exception:
+        pass
+
+
+def _run_tree(cmd, input=None, timeout=None, env=None, cwd=None):
+    """subprocess.run 的替身：超时、或等待中出了任何异常（手动跑时按 Ctrl-C、收到终止信号），都先结束自己起的整棵进程树再收尾。
+    subprocess.run 超时只杀直接子进程：npm 垫片时那是 cmd.exe，握着输出管道的 claude.exe 让它在 Windows 上一直等下去
+    （CPython gh-81605）；别的系统上孙进程成了孤儿接着跑。_resolve_exe 认不出垫片、或 claude.exe 自己又起了子进程时，靠这里兜底
+    （复核 C-05 的"按进程树杀"）。Windows 靠 taskkill /T 按父子关系往下找：中间某一层先退出、链条断了的后代够不着（复核 RB-5）。
+    提示词先写进临时文件当标准输入：Windows 上 communicate 往管道里写是阻塞的、不受时限管，子进程卡在读输入之前时
+    时限就形同虚设（复核 RB-7）。"""
+    kw = {"creationflags": NO_WINDOW} if os.name == "nt" else {"start_new_session": True}
+    with tempfile.TemporaryFile() as fin:
+        if input:
+            fin.write(input.encode("utf-8"))
+            fin.seek(0)
+        with subprocess.Popen(cmd, stdin=fin, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
+                              encoding="utf-8", errors="replace", env=env, cwd=cwd, **kw) as p:
+            try:
+                out, err = p.communicate(timeout=timeout)
+            except BaseException as first:  # subprocess.run 对任何异常都先杀子进程；这里杀整棵树（复核 RB-2）
+                _kill_tree(p)
+                late = None
+                try:
+                    p.communicate(timeout=10)
+                except BaseException as e:
+                    if isinstance(e, (SystemExit, KeyboardInterrupt)):
+                        late = e  # 收尾等待时又来了终止信号或 Ctrl-C：以它为准，别被吞掉（复核 RC-6）
+                    # 树杀之后管道还被够不着的后代握着（链条断了）：别让 with 收尾时关读端——Windows 上读线程卡在 read() 里，
+                    # 关读端要等到那个后代自己退出，时限就没了上限（复核 RC-1）
+                    p.stdout = p.stderr = None
+                if late is not None:
+                    raise late from first
+                raise
+    return subprocess.CompletedProcess(cmd, p.returncode, out, err)
+
+
+def _posix_term_as_exit():
+    """POSIX：被 SIGTERM／SIGHUP 结束时（timeout 命令到点、关掉终端）也抛异常走 _run_tree 的收尾——模型子进程起时自成一组，
+    发给本进程组的信号到不了它（复核 RB-2）。只替换默认处理的信号（nohup 设成忽略的 SIGHUP 不动），返回原来的处理器，
+    run_cli 收尾时还原（复核 RC-6）。只在主线程装得上；Windows 不装。"""
+    old = {}
+    if os.name == "nt":
+        return old
+
+    def _raise(signum, frame):
+        raise SystemExit(128 + signum)
+    for name in ("SIGTERM", "SIGHUP"):
+        sig = getattr(signal, name, None)
+        if sig is None:
+            continue
+        try:
+            if signal.getsignal(sig) == signal.SIG_DFL:
+                old[sig] = signal.signal(sig, _raise)
+        except (ValueError, OSError):
+            pass
+    return old
 
 
 def _glm_cc_env(key):
@@ -1000,8 +1075,7 @@ def _cc_run(prompt, model, schema=None):
     t0 = time.time()
     red = lambda s: (s or "").replace(key, "***")
     try:
-        r = subprocess.run(cmd, input=prompt, capture_output=True, text=True, encoding="utf-8", errors="replace",
-                           timeout=tmo, env=_glm_cc_env(key), cwd=cwd, creationflags=NO_WINDOW)
+        r = _run_tree(cmd, input=prompt, timeout=tmo, env=_glm_cc_env(key), cwd=cwd)
     except subprocess.TimeoutExpired:
         raise RuntimeError(f"经 Claude Code 调 GLM 超过 {int(tmo)} 秒没有返回")
     finally:
@@ -1035,23 +1109,39 @@ def call_model_glm_cc(prompt, model=None):
     LAST_USAGE.update({"provider": "glm", "via": "claude-code", "model": model, "served_model": served, "usage": u})
     txt = str(obj.get("result") or "")
     if obj.get("is_error"):
-        if _TRUNC.search(txt) or obj.get("subtype") == "error_max_turns":
-            raise ModelOutputError(f"经 Claude Code 调 GLM 输出到了上限被截断、没交出结构化结果：{txt[:200]}", txt)
-        raise RuntimeError(f"经 Claude Code 调 GLM 出错：{txt[:300]}")
+        _cc_failed(obj, "经 Claude Code 调 GLM ")
     so = obj.get("structured_output")
     if isinstance(so, dict):
         return so
     try:
-        return parse_model_json(txt)
+        return _shaped(parse_model_json(txt))
     except ModelOutputError as e:
         print(f"! 模型输出解析失败（{e}），请便宜模型只修语法再试一次")
         fix_prompt = ("下面是一段本应是 JSON 的文本，有语法错误（多半是字符串里的英文双引号没转义）。"
                       "请只修语法、不改任何文字内容，字符串里的英文双引号改成「」，只输出修好的 JSON：\n\n" + txt)
         try:
             obj2, _ = _cc_run(fix_prompt, C.cfg("lessons", "glm_repair_model", "glm-5.3-flash"))
-            return parse_model_json(str(obj2.get("result") or ""))
+            if obj2.get("is_error"):  # 修语法那一次也按同一规则分：连不上、限频是这一轮失败，不是输出坏了（复核 RA-2）
+                _cc_failed(obj2, "请便宜模型修语法那一步")
+            return _shaped(parse_model_json(str(obj2.get("result") or "")))
         except ModelOutputError as e2:  # 只有"修了还是坏"算输出坏了；连不上、超时这类真故障原样上抛（复核 R2-2-4）
             raise ModelOutputError(f"{e}；修复也失败：{e2}", txt)
+
+
+def _cc_failed(obj, what):
+    """Claude Code 以 is_error 交回：认得出的截断、轮数用尽 → 输出坏了（ModelOutputError）；其余（连不上、限频、认证）→ 这一轮失败。"""
+    txt = str(obj.get("result") or "")
+    if _TRUNC.search(txt) or obj.get("subtype") == "error_max_turns":
+        raise ModelOutputError(f"{what}输出到了上限被截断、没交出结构化结果：{txt[:200]}", txt)
+    raise RuntimeError(f"{what}出错：{txt[:300]}")
+
+
+def _shaped(d):
+    """交回的 JSON 得是 {…, "candidates": [...]}：错误体里的 JSON（比如限频返回的 {"error": …}）不能当成"0 条候选"，
+    不然这一批报告会被记成已读、教训无声丢掉（复核 RA-2）。"""
+    if not (isinstance(d, dict) and isinstance(d.get("candidates"), list)):
+        raise ModelOutputError("交回的 JSON 不是要的格式（没有 candidates 列表）", json.dumps(d, ensure_ascii=False)[:2000])
+    return d
 
 
 def call_model(prompt, model, config_dir=None):
@@ -1082,8 +1172,7 @@ def call_model_claude(prompt, model, config_dir=None):
     env = dict(os.environ)
     if config_dir:
         env["CLAUDE_CONFIG_DIR"] = config_dir
-    r = subprocess.run(cmd, input=prompt, capture_output=True, text=True, encoding="utf-8", timeout=1800, env=env,
-                       creationflags=NO_WINDOW)
+    r = _run_tree(cmd, input=prompt, timeout=1800, env=env)
     if r.returncode != 0:
         raise RuntimeError(f"claude 退出码 {r.returncode}：{(r.stderr or r.stdout)[:400]}")
     obj = json.loads(r.stdout)
@@ -1099,7 +1188,7 @@ def call_model_claude(prompt, model, config_dir=None):
         raise RuntimeError(f"claude 报错：{str(obj.get('result'))[:400]}")
     so = obj.get("structured_output")
     if so is None:
-        so = parse_model_json(obj.get("result") or "")
+        so = _shaped(parse_model_json(obj.get("result") or ""))
     return so
 
 
@@ -1562,6 +1651,7 @@ class _Tee:
 def run_cli(argv):
     """命令行入口（handoffctl 的 run daily 等也走这里）：输出同时逐行写进日志，任何未预料的异常都落进日志。"""
     C.stdio_safe()
+    old_sig = _posix_term_as_exit()
     log_path = C.P.lessons_log
     old_out, old_err, lf = sys.stdout, sys.stderr, None
     try:
@@ -1582,6 +1672,11 @@ def run_cli(argv):
         return 1
     finally:
         sys.stdout, sys.stderr = old_out, old_err
+        for sig, h in old_sig.items():  # 同一进程里接着跑的（handoffctl run daily 学完顺带的巡检）不带着这两个处理器（复核 RC-6）
+            try:
+                signal.signal(sig, h)
+            except (ValueError, OSError):
+                pass
         if lf:
             try:
                 lf.close()

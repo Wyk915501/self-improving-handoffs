@@ -115,6 +115,29 @@ def status_kind(cell):
     return "bad"
 
 
+PENDING_MIN_WAIT = timedelta(hours=47, minutes=59)  # 遗留拟生效行：到期距加入不足 48 小时，promote 不转
+PENDING_NO_MARK = "出处格缺「加入」标记"
+
+
+def pending_blocker(status_cell, src_cell):
+    """遗留的标准「拟生效（至 …）」行到期后，每日学习的 promote 会不会把它转成生效：会 → None；不会 → 一句原因。
+    promote、看门狗的文案、表体检三处同一口径（复核 R2-1-8、RA-8：以前看门狗说"下一次自动学习会转"，promote 却永远不转）。"""
+    m = PEND_FULL.match((status_cell or "").strip())
+    if not m:
+        return None
+    am = ADDED_ANY.search(src_cell or "")
+    if not am:
+        return PENDING_NO_MARK
+    try:
+        due = datetime.strptime(f"{m.group(1)} {m.group(2)}", "%Y-%m-%d %H:%M")
+        added = datetime.strptime(am.group(1), "%Y-%m-%d %H:%M")
+    except ValueError:
+        return "到期或加入的时间写法认不出"
+    if due - added < PENDING_MIN_WAIT:
+        return "到期距加入不足 48 小时"
+    return None
+
+
 def cells_of(ln):
     return [c.strip() for c in ln.strip().strip("|").split("|")]
 
@@ -177,6 +200,9 @@ def lint_table(text, published_text=None):
             continue
         if status_kind(c[1]) == "bad":
             out.append((lid, f"状态格「{c[1][:24]}」认不出：这条既不会进生效版，也不会出现在提醒里（改成「生效（日期 说明）」或标准的「拟生效（至 YYYY-MM-DD HH:MM）」）"))
+        elif status_kind(c[1]) == "pending" and pending_blocker(c[1], c[4]) not in (None, PENDING_NO_MARK):
+            out.append((lid, f"拟生效行{pending_blocker(c[1], c[4])}：到期也不会自动转生效（改成「生效（日期 说明）」，"
+                             "或把出处格里「加入 时间（自动／人工）」的时间改对）"))
         elif status_kind(c[1]) == "pending" and not ADDED_ANY.search(c[4]):
             out.append((lid, "拟生效行的出处格没有「加入 时间（自动／人工）」标记：到期也不会自动转生效（改成「生效（日期 说明）」，或补上加入标记）"))
     if published_text and re.search(r"@[^\s@＠]", "\n".join(published_text.split("\n")[5:])):
@@ -223,7 +249,8 @@ def is_remote_path(s):
     巡检整轮被拖慢或崩，对端是恶意主机时 Windows 还可能带上本机凭据（推断，未抓包）。处理页出处、写后检查 G6、
     规范扫描 W2 三处共用这一个判断，一律不碰它（复核 B-01、R2-2-2）。"""
     r = urllib.parse.unquote(str(s or "")).strip().replace("\\", "/")
-    return r.startswith("//")
+    # \??\UNC\主机\共享 是 NT 直通前缀，同样走 SMB 重定向器；Windows 的 normpath 还会把 /??/… 改写成它（复核 RA-1）
+    return r.startswith("//") or r.startswith("/??/")
 
 
 def veto_ids(table_path):

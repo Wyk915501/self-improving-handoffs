@@ -27,7 +27,11 @@ jobs:
       - name: watchdog (no popups, no registry, no real scheduled tasks)
         run: python -X utf8 -B 规范/交接写时门/tests/test_notify.py
       - name: notifications and decision page (toast dry run only on Windows; SKIP elsewhere)
-        run: python -X utf8 -B 规范/交接写时门/tests/test_ui.py
+        shell: bash
+        run: |
+          python -X utf8 -B 规范/交接写时门/tests/test_ui.py | tee test_ui.log
+          # Publish the summary line (counts and any SKIPs) as an annotation, readable without signing in
+          echo "::notice title=test_ui ${{ matrix.os }} py${{ matrix.python }}::$(grep -E '^合计' test_ui.log)"
       - name: workflow-rules scanner (report-only)
         run: python -X utf8 -B 规范/交接写时门/tests/test_flow.py
       - name: command-line entry point (temporary runtime dir, touches no real install)

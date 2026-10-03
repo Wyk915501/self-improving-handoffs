@@ -366,6 +366,22 @@ finally:
     io.open(TABLE, "wb").write(_tb)
 ok("C20c 教训表有坏字节：status 与 table-check 都返回 1、说清是坏字节，不抛异常", rc1 == 1 and rc2 == 1 and "坏字节" in out1 and "坏字节" in out2)
 
+ok("C20d 状态文件里 last_task_check 坏成了字符串：巡检心跳当没有（第二轮 R2-2-3；复核 RA-6）",
+   m.C.task_heartbeat({"last_task_check": "abc", "last_check": {"utc": "2026-10-01T00:00:00+00:00", "source": "daily"}}) == {})
+
+print("== C21 doctor 的 Claude Code 一项：只有 npm 垫片时报「!」写明原因；旁边有 claude.exe 时直接用它；找不到报「✗」（第二轮 R2-2-6；复核 RA-6）==")
+_sd21 = tempfile.mkdtemp(prefix="hc_shim_")
+_cmd21 = os.path.join(_sd21, "claude.CMD")
+io.open(_cmd21, "w", encoding="utf-8").write("@echo off\n")
+_c21a = m._claude_check(_cmd21)
+os.makedirs(os.path.join(_sd21, "node_modules", "@anthropic-ai", "claude-code", "bin"))
+_exe21 = os.path.join(_sd21, "node_modules", "@anthropic-ai", "claude-code", "bin", "claude.exe")
+io.open(_exe21, "w", encoding="utf-8").write("x")
+ok("C21 只有垫片：「!」并说写 claude.exe 的完整路径；有 claude.exe：「✓」用它；找不到：「✗」",
+   _c21a[0] == "!" and "claude.exe 的完整路径" in _c21a[1] and m._claude_check(_cmd21) == ("✓", _exe21)
+   and m._claude_check(None)[0] == "✗")
+shutil.rmtree(_sd21, ignore_errors=True)
+
 n_fail = sum(1 for _, c in results if not c)
 print(f"\n合计 {len(results)} 项，失败 {n_fail} 项")
 shutil.rmtree(ROOT, ignore_errors=True)

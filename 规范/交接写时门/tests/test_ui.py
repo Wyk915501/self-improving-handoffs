@@ -478,13 +478,14 @@ sent.clear(); sent_meta.clear()
 n.toast("t", "b", kind="hold")
 ok("U12z hold 类 24 小时后从通知中心消失（复核 D-14：以前用系统默认的 3 天）", sent_meta[-1]["expire_min"] == 1440)
 
-print("== U13 出处里的 UNC／盘符／绝对路径：不碰文件系统就拒（复核 B-01：连 SMB 会带出本机凭据，连不上让巡检整轮崩）==")
+print("== U13 出处里的 UNC／盘符／绝对路径：不碰文件系统就拒（复核 B-01：连不上让巡检整轮崩，实测；对端是恶意主机时还可能带出本机凭据，推断、未抓包）==")
 import time as _tm
 _evil = ["//192.0.2.1/s/x.md", "\\\\192.0.2.1\\s\\x.md", "%5C%5C192.0.2.1%5Cs%5Cx.md", "%2F%2F192.0.2.1%2Fs%2Fx.md",
-         "\\\\?\\UNC\\192.0.2.1\\s\\x.md", "C:x.md", "/etc/x.md", "file:x.md"]
+         "\\\\?\\UNC\\192.0.2.1\\s\\x.md", "C:x.md", "/etc/x.md", "file:x.md",
+         "\\??\\UNC\\192.0.2.1\\s\\x.md", "%5C%3F%3F%5CUNC%5C192.0.2.1%5Cs%5Cx.md"]  # NT 直通前缀（复核 RA-1）
 _t0 = _tm.time()
 _res = [n._safe_md(r_, WT)[1] for r_ in _evil]
-ok("U13a 八种写法都判「不在允许范围」，而且没有去连网络（全部加起来 < 0.5 秒）",
+ok("U13a 十种写法都判「不在允许范围」，而且没有去连网络（全部加起来 < 0.5 秒）",
    all(x == "文件不在允许范围" for x in _res) and _tm.time() - _t0 < 0.5)
 reset()
 put(BASE + [f"| LG-02 | 生效（自动） | 报告里的数字要带出处 | 事二 | [r](//192.0.2.1/s/x.md)；{added(1)} |"])
@@ -586,7 +587,7 @@ _r2 = list(sent)
 sent.clear()
 n.check(T, now_utc=NOW + timedelta(hours=6), task_present=False)
 ok("U15g 终端里替负责人点了不采纳：下一轮告知一次，只说一次（复核 B-04：终端那边没有回执）",
-   any("终端里有人把 1 条规矩标成了不采纳" in s_[1] for s_ in _r2) and not any("终端里有人" in s_[1] for s_ in sent))
+   any("终端里有人不采纳了「" in s_[1] for s_ in _r2) and not any("终端里有人" in s_[1] for s_ in sent))
 
 print("== U16 终端「看过了」要 --confirm-held、记成终端标的（复核 B-03）==")
 reset()
@@ -780,7 +781,10 @@ ok("U29 两条证据都不成链接", "外面.md" not in page() and "192.0.2.1" 
 
 print("== U30 参数不合法的日志：口令段打码（复核 B-09）==")
 n.decide("handoff-rule:no/LG-01/aaaaaaaaaa/extra", T)
-ok("U30 日志里没有那段口令", "aaaaaaaaaa" not in io.open(os.environ["HN_LOG_PATH"], encoding="utf-8").read())
+for _tail in ("bbbbbbbbbb?x=1", "cccccccccc#frag", "ddddddddddx", "eeeeeeeeee extra"):  # 第二轮 R2-2-5 的几种尾巴（复核 RA-6）
+    n.decide(f"handoff-rule:no/LG-01/{_tail}", T)
+_log30 = io.open(os.environ["HN_LOG_PATH"], encoding="utf-8").read()
+ok("U30 日志里没有那段口令（含 ?x=1、#frag、紧跟字母、空格几种尾巴）", not any(x * 10 in _log30 for x in "abcde"))
 
 print("== U31 「」里引的规矩原文原样保留，不算命中兜底（复核 A-10）==")
 sent.clear(); sent_meta.clear()
@@ -810,13 +814,17 @@ ok("U33 顺带那轮之后 last_task_check 仍是旧心跳", (_st.get("last_task
    and C.task_heartbeat(_st).get("utc") == H(2))
 
 print("== U34 第二件要你做的事来时：常驻弹窗写明一共几件（同类弹窗会替换掉上一条，复核 A-03）==")
+# 锚在当天北京 10:00：两轮相隔 1 小时不跨午夜。复核 RB-4：北京 23 点以后跑，「连续 36 小时没成功」的键换了日期、被当成新的
+# 又说一遍，正文就不写「一共 2 件」了——那一小时里 promote 会拒绝部署
+_N34 = NOW.astimezone(BJ).replace(hour=10, minute=0, second=0, microsecond=0).astimezone(timezone.utc)
+_H34 = lambda h: (_N34 - timedelta(hours=h)).isoformat()
 reset()
 put(BASE + [_L9])
-lstate({"last_scan_utc": H(40), "last_run": {"utc": H(40), "rc": 0}})
-n.check(T, now_utc=NOW, task_present=True)
-lstate({"last_scan_utc": H(40), "last_run": {"utc": H(40), "rc": 0}, **_U9})
+lstate({"last_scan_utc": _H34(40), "last_run": {"utc": _H34(40), "rc": 0}})
+n.check(T, now_utc=_N34, task_present=True)
+lstate({"last_scan_utc": _H34(40), "last_run": {"utc": _H34(40), "rc": 0}, **_U9})
 sent.clear(); sent_meta.clear()
-n.check(T, now_utc=NOW + timedelta(hours=1), task_present=True)
+n.check(T, now_utc=_N34 + timedelta(hours=1), task_present=True)
 _h = hit("表里冒出一条不是本机加的规矩")
 ok("U34 正文写「要你做的事一共 2 件」", bool(_h) and _h[0][0][3] is True and "一共 2 件" in _h[0][0][1])
 
@@ -907,7 +915,7 @@ _rc = n.decide("adopt/RP-010", T, require_token=False, allow_held=True)
 sent.clear()
 n.check(T, now_utc=NOW + timedelta(hours=1), task_present=False)
 n.check(T, now_utc=NOW + timedelta(hours=5), task_present=False)
-ok("U41 告知「终端里有人采纳了 1 条候选」", _rc == 0 and any("终端里有人采纳了 1 条候选" in s_[1] for s_ in sent))
+ok("U41 告知「终端里有人采纳了候选…」", _rc == 0 and any("终端里有人采纳了候选「" in s_[1] for s_ in sent))
 
 print("== U42 教训表／否决记录里混进坏字节：巡检照常、要你介入、说清是哪份（复核 R2-2-1：以前发布自检那一步就崩了）==")
 reset()
@@ -957,6 +965,300 @@ n.check(T, now_utc=NOW, task_present=False)
 ok("U46 常驻提醒说有认不出的地方；页面写「到期也不会自动生效」；不说「不用你做事」",
    any(s_[3] is True and "认不出" in s_[1] for s_ in sent) and "到期也不会自动生效" in page()
    and not any("没标记的手写规矩" in s_[1] and "不用你做事" in s_[1] for s_ in sent))
+
+print("== U47 你恢复之后别处又加了一行（已告知「多了」）、再被别处删掉：照样告知「少了」（第十一批，R2-1-4：以前当成你自己恢复，静默）==")
+reset()
+put(ROWS)
+n.check(T, now_utc=NOW, task_present=False)
+_tk = re.search(r"handoff-rule:no/LG-03/([0-9a-f]{10})", page())
+n.decide(f"handoff-rule:no/LG-03/{_tk.group(1) if _tk else 'x'}", T)
+_ub = re.search(r"handoff-rule:unveto/LG-03/([0-9a-f]{10})", page())
+_rcu = n.decide(f"handoff-rule:unveto/LG-03/{_ub.group(1) if _ub else 'x'}", T)
+put(ROWS, veto_rows=[VROW])
+sent.clear()
+n.check(T, now_utc=NOW + timedelta(hours=1), task_present=False)
+_more = [s_[1] for s_ in sent if "不采纳记录里多了 1 条" in s_[1]]
+put(ROWS)
+sent.clear()
+n.check(T, now_utc=NOW + timedelta(hours=2), task_present=False)
+n.check(T, now_utc=NOW + timedelta(hours=6), task_present=False)
+ok("U47 先告知「多了 1 条」（指向处理页「最近 30 天撤下的」，第二轮 R2-3-10 ⑥），别处删掉后告知「少了 1 条」",
+   _rcu == 0 and bool(_more) and "「最近 30 天撤下的」" in _more[0] and any("不采纳记录里少了 1 条" in s_[1] for s_ in sent))
+
+print("== U48 你点「恢复」时 veto_seen 没来得及改（写状态失败）：巡检按最近操作认出是你自己恢复的，不说「少了」"
+      "（第二轮 R2-3-10 ⑧：两套机制原来只有合起来才有测试）==")
+reset()
+put(ROWS)
+n.check(T, now_utc=NOW, task_present=False)
+_tk = re.search(r"handoff-rule:no/LG-03/([0-9a-f]{10})", page())
+n.decide(f"handoff-rule:no/LG-03/{_tk.group(1) if _tk else 'x'}", T)
+_tm.sleep(0.02)
+_undo = _patch(n, "_forget_veto", lambda oid: None)
+try:
+    _ub = re.search(r"handoff-rule:unveto/LG-03/([0-9a-f]{10})", page())
+    _rcu = n.decide(f"handoff-rule:unveto/LG-03/{_ub.group(1) if _ub else 'x'}", T)
+finally:
+    _undo()
+_still = "LG-03" in nload().get("veto_seen", [])
+sent.clear()
+n.check(T, now_utc=NOW + timedelta(hours=1), task_present=False)
+n.check(T, now_utc=NOW + timedelta(hours=5), task_present=False)
+ok("U48 不说「少了」；veto_seen 随后对齐", _rcu == 0 and _still and not any("不采纳记录里少了" in s_[1] for s_ in sent)
+   and "LG-03" not in nload().get("veto_seen", []))
+
+print("== U49 一轮有 5 件告知：先说 3 件、写明另有 2 件，下一轮说完，每件恰好一次（第二轮 R2-3-10 ②）==")
+reset()
+put(BASE + [f"| LG-0{_i} | 生效 | 规矩{_i} | 事 | 源 |" for _i in range(2, 7)])
+n.check(T, now_utc=NOW, task_present=False)
+for _i in range(2, 7):
+    n.decide(f"no/LG-0{_i}", T, require_token=False, reason="终端试一下", allow_held=False)
+sent.clear(); sent_meta.clear()
+n.check(T, now_utc=NOW + timedelta(hours=1), task_present=False)
+_r49a = [s_[1] for s_ in sent]
+n.check(T, now_utc=NOW + timedelta(hours=5), task_present=False)
+n.check(T, now_utc=NOW + timedelta(hours=9), task_present=False)
+_n49 = sum(b_.count("终端里有人") for b_ in (s_[1] for s_ in sent))
+ok("U49 第一轮一条弹窗：3 件＋「另有 2 件」；三轮合计恰好 5 件",
+   len(_r49a) == 1 and _r49a[0].count("终端里有人") == 3 and "另有 2 件" in _r49a[0] and _n49 == 5)
+
+print("== U50 「最近 30 天撤下的」里你点过不用的候选：也只列 30 天内的（第二轮 R2-3-10 ③）==")
+reset()
+put(BASE)
+json.dump({"items": [{"id": "RP-011", "rule": "四十天前点过不用的候选", "status": "ignored",
+                      "decided": f"{(NOW - timedelta(days=40)).astimezone(BJ):%Y-%m-%d} 08:00"},
+                     {"id": "RP-012", "rule": "今天点过不用的候选", "status": "ignored", "decided": f"{TODAY} 08:00"}]},
+          io.open(n.POOL_PATH, "w", encoding="utf-8"), ensure_ascii=False)
+n.check(T, now_utc=NOW, task_present=False)
+_p = page()
+ok("U50 今天那条列着、能恢复为候选；40 天前那条不列", 'id="d-RP-012"' in _p and "undrop/RP-012" in _p and 'id="d-RP-011"' not in _p)
+
+print("== U51 学完顺带的那轮等巡检锁 300 秒，计划任务那轮只等 5 秒（复核 C-08；第二轮 R2-1-9 M26）==")
+_waits = []
+
+
+class _LockSpy:
+    def __init__(self, path, stale_sec=None):
+        self.path = path
+
+    def acquire(self, wait=0):
+        _waits.append((os.path.basename(self.path), wait))
+        return False
+
+    def release(self):
+        pass
+
+
+_undo = _patch(n.C, "Lock", _LockSpy)
+try:
+    n.check(T, now_utc=NOW, task_present=False, source="daily")
+    n.check(T, now_utc=NOW, task_present=False, source="task")
+finally:
+    _undo()
+ok("U51 顺带那轮 300 秒、计划任务那轮 5 秒", [w_ for p_, w_ in _waits if p_.endswith(".check.lock")] == [300, 5])
+
+print("== U52 「多了 N 条」上一轮已经说过、记账却没落盘：这一轮直接记账，不重复说（第二轮 R2-1-9 M32）==")
+reset()
+put(ROWS)
+n.check(T, now_utc=NOW, task_present=False)
+put(ROWS, veto_rows=[VROW])
+_st = nload()
+_key = f"vetoext:g{n._int(_st.get('veto_gen'))}:" + C.sha("\n".join(n._veto_rows(T)[x] for x in ["LG-03"]))[:10]
+_st.setdefault("notified", {})[_key] = f"{TODAY} 00:00"
+nstate(_st)
+sent.clear()
+n.check(T, now_utc=NOW + timedelta(hours=1), task_present=False)
+ok("U52 不重复说；veto_seen 里记上了", not any("不采纳记录里多了" in s_[1] for s_ in sent) and "LG-03" in nload().get("veto_seen", []))
+
+tier("规范扫描输出认不出（flowerr；第二轮 R2-3-10 ①：以前只有超时那一支有测试）",
+     lambda: _patch(n.subprocess, "run", lambda *a, **k: types.SimpleNamespace(returncode=0, stdout="不认识的输出", stderr="")),
+     {"task_present": False, "flow_root": DOCS}, "脚本出错或输出认不出", "need", True)
+
+print("== U53 巡检正在发「多了 1 条」时你就点了「恢复」：之后不说「少了」（复核 RB-1：并进「已知」的时刻曾按落盘时刻记，"
+      "你自己的恢复被当成别处删的，还劝你加回去）==")
+reset()
+put(ROWS)
+n.check(T, now_utc=NOW, task_present=False)
+put(ROWS, veto_rows=[VROW])
+n.check(T, now_utc=NOW, task_present=False, pages_only=True)  # 处理页上已经列着这条、带「恢复」
+_ub53 = re.search(r"handoff-rule:unveto/LG-03/([0-9a-f]{10})", page())
+_send53 = n._send
+
+
+def _send_click(title, body, buttons=None, persistent=True, meta=None):
+    sent.append((title, body, buttons, persistent))
+    sent_meta.append(meta)
+    if "不采纳记录里多了" in (body or "") and _ub53:
+        n.decide(f"handoff-rule:unveto/LG-03/{_ub53.group(1)}", T)  # 看到弹窗当场点了「恢复」，这一轮巡检还没收尾
+    return True
+
+
+n._send = _send_click
+sent.clear(); sent_meta.clear()
+try:
+    n.check(T, now_utc=NOW + timedelta(hours=1), task_present=False)
+finally:
+    n._send = _send53
+_told53 = any("不采纳记录里多了" in s_[1] for s_ in sent)
+sent.clear(); sent_meta.clear()
+n.check(T, now_utc=NOW + timedelta(hours=2), task_present=False)
+n.check(T, now_utc=NOW + timedelta(hours=6), task_present=False)
+ok("U53 「多了」照常告知；你当场点的「恢复」算你自己的，之后不说「少了」",
+   bool(_ub53) and _told53 and not any("不采纳记录里少了" in s_[1] for s_ in sent))
+
+print("== U54 升级前就在「已知」里、没有时刻的编号：补上时刻；以前恢复过、后来又被加回、现在被别处删掉，照样告知「少了」（复核 RB-9）==")
+reset()
+put(ROWS, veto_rows=[VROW])
+n.check(T, now_utc=NOW, task_present=False)  # 升级首轮：LG-03 对齐进「已知」
+_st54 = nload()
+_st54.pop("veto_seen_ms", None)  # 上一版留下的状态：「已知」里有、没有时刻
+_st54["acts"] = [{"oid": "LG-03", "act": "unveto", "ms": int((NOW - timedelta(hours=3)).timestamp() * 1000), "src": "page", "rule": "规矩三"}]
+nstate(_st54)
+n.check(T, now_utc=NOW + timedelta(hours=1), task_present=False)  # 这一轮给老编号补上时刻
+put(ROWS)  # 别处删掉了那一行
+sent.clear(); sent_meta.clear()
+n.check(T, now_utc=NOW + timedelta(hours=2), task_present=False)
+n.check(T, now_utc=NOW + timedelta(hours=6), task_present=False)
+ok("U54 告知「少了 1 条」", any("不采纳记录里少了 1 条" in s_[1] for s_ in sent))
+
+print("== U55 状态文件里时刻或代数是无穷大（1e999 读进来是 inf）：巡检照常、心跳落盘（复核 RB-6：以前每轮在同一处崩）==")
+_ms55 = int(NOW.timestamp() * 1000)
+for _i, _bad in enumerate([{"veto_seen": ["LG-03"], "veto_v2": "x", "veto_seen_ms": {"LG-03": float("inf")},
+                            "acts": [{"oid": "LG-03", "act": "unveto", "ms": _ms55, "src": "page"}]},
+                           {"veto_gen": float("-inf")},
+                           {"acts": [{"oid": "LG-03", "act": "unveto", "ms": float("inf"), "src": "page"}]}]):
+    reset()
+    put(ROWS)
+    nstate(dict(_bad, page_secret="ab" * 16))
+    _rc = n.run_main(["check", T])
+    ok(f"U55{chr(97 + _i)} {json.dumps(_bad, ensure_ascii=False)[:48]}：返回 0、心跳落盘", _rc == 0 and bool(nload().get("last_task_check")))
+
+print("== U56 已经要你介入、又挤掉了几条告知：「处理页上都列着」只说要你做的事，挤掉的写「下一轮接着说」（第二轮 R2-1-7 ⓐ）==")
+reset()
+put(BASE + [_L9, "| LG-02 | 生效 | 规矩二 | 事 | 源 |", "| LG-03 | 生效 | 规矩三 | 事 | 源 |"])
+lstate({"last_scan_utc": _H34(40), "last_run": {"utc": _H34(40), "rc": 0}})
+n.check(T, now_utc=_N34, task_present=True)  # 第一轮：说了「连续 36 小时没成功」（之后仍然成立）
+lstate({"last_scan_utc": _H34(40), "last_run": {"utc": _H34(40), "rc": 0}, **_U9})  # 第二轮又冒出表外规矩：新的要你做的事
+for _lid in ("LG-02", "LG-03"):
+    n.decide(f"no/{_lid}", T, require_token=False, reason="终端试一下", allow_held=False)  # 两条终端替你做的决定（告知类）
+sent.clear(); sent_meta.clear()
+n.check(T, now_utc=_N34 + timedelta(hours=1), task_present=True)
+_h56 = [s_[1] for s_ in sent if s_[3] is True]
+ok("U56 常驻弹窗写「要你做的事一共 2 件，处理页上都列着；另有 1 条消息，下一轮接着说」",
+   bool(_h56) and "要你做的事一共 2 件，处理页上都列着；另有 1 条消息，下一轮接着说" in _h56[0])
+
+print("== U57 告知超过 4 件、终端替你做的那件排在后面没列出来：标题也不说「不用你做事」（第二轮 R2-1-7 ⓑ）==")
+reset()  # 锚在北京 10:00：自动处理记录只认「今天」开头的，两轮跨午夜就不算了（复核 RC-2，和 U34 同一类）
+put(BASE + ["| LG-02 | 生效 | 规矩二 | 事 | 源 |"])
+n.check(T, now_utc=_N34, task_present=False)
+put(BASE + ["| LG-02 | 生效 | 规矩二 | 事 | 源 |"],
+    updates=[f"- {_N34.astimezone(BJ):%Y-%m-%d} 09:0{_i}：LG-2{_i} 自动处理（否决记录同步／撤销否决恢复／遗留拟生效到期转生效）。（handoff_lessons.py）"
+             for _i in range(4)])
+n.decide("no/LG-02", T, require_token=False, reason="终端试一下", allow_held=False)
+sent.clear(); sent_meta.clear()
+n.check(T, now_utc=_N34 + timedelta(hours=1), task_present=False)
+_i57 = [s_[0] for s_, m_ in zip(sent, sent_meta) if m_ and m_["kind"] == "info"]
+ok("U57 标题是「知会一声（5 件）」、不说「不用你做事」", bool(_i57) and "知会一声（5 件）" in _i57[0] and "不用你做事" not in _i57[0])
+
+print("== U58 终端替你不采纳：告知里写的撤法是处理页上真有的按钮（「最近 30 天撤下的」→「恢复」；第二轮 R2-1-7 ⓒ）==")
+reset()
+put(BASE + [f"| LG-03 | 生效（自动） | 报告里写的数字必须带上出处与观测时点，并且注明是谁在什么时候测的 | 事三 | {added(1)} |"])  # 真实长度的规矩（复核 RC-3）
+n.check(T, now_utc=NOW, task_present=False)
+n.decide("no/LG-03", T, require_token=False, reason="终端试一下", allow_held=False)
+sent.clear(); sent_meta.clear()
+n.check(T, now_utc=NOW + timedelta(hours=2), task_present=False)
+n.check(T, now_utc=NOW + timedelta(hours=6), task_present=False)
+_x58 = [m_["xml"] for s_, m_ in zip(sent, sent_meta) if m_ and "终端里有人" in (s_[1] or "")]
+ok("U58 真弹出去的弹窗（每行最多 60 字）里有撤法「要撤：处理页「最近 30 天撤下的」点「恢复」」；处理页那一区真有这条的「恢复」按钮",
+   bool(_x58) and "要撤：处理页「最近 30 天撤下的」点「恢复」" in _x58[0] and 'id="vetoed"' in page() and "unveto/LG-03/" in page())
+ok("U58b 七种终端动作的告知：规矩原文再长，这一行也在 60 字以内，撤法不会被截掉（复核 RC-3）",
+   len(n._TERM_LINE) == 7 and all(len(t.replace("{r}", n.cut("很长很长的规矩原文" * 5, 10))) <= 60 for t in n._TERM_LINE.values()))
+
+print("== U59 只有生效版混进了坏字节（教训表与不采纳记录都好）：巡检当轮重新生成，不再每天请你介入（复核 RA-5）==")
+reset()
+put(BASE)
+n._lessons().publish(T)
+_pub59 = os.path.join(WT, C.PUBLISH_NAME)
+io.open(_pub59, "ab").write(b"\xff\xfe")
+_ap59 = n.AUTO_PUBLISH
+n.AUTO_PUBLISH = True
+sent.clear(); sent_meta.clear()
+try:
+    _rc59 = n.run_main(["check", T])
+finally:
+    n.AUTO_PUBLISH = _ap59
+try:
+    io.open(_pub59, encoding="utf-8").read()
+    _ok59 = True
+except UnicodeDecodeError:
+    _ok59 = False
+ok("U59 返回 0、生效版重新读得出、没有「坏字节」的常驻提醒",
+   _rc59 == 0 and _ok59 and not any(s_[3] is True and "坏字节" in s_[1] for s_ in sent))
+
+print("== U60 手写拟生效行到期距加入不足 48 小时（每日学习永远不会转它）：照实说要手改，表体检也报（复核 RA-8）==")
+reset()
+_a60, _d60 = (NOW - timedelta(hours=20)).astimezone(BJ), (NOW + timedelta(hours=4)).astimezone(BJ)
+put(BASE + [f"| LG-08 | 拟生效（至 {_d60:%Y-%m-%d %H:%M}） | 短等待的手写规矩 | 事 | 源；加入 {_a60:%Y-%m-%d %H:%M}（人工） |"])
+sent.clear(); sent_meta.clear()
+n.check(T, now_utc=NOW, task_present=False)
+ok("U60 页面写「到期也不会自动生效（到期距加入不足 48 小时，要手改）」；常驻提醒说有认不出的地方；不说「不用你做事」",
+   "到期也不会自动生效（到期距加入不足 48 小时，要手改）" in page() and any(s_[3] is True and "认不出" in s_[1] for s_ in sent)
+   and not any("短等待的手写规矩" in s_[1] and "不用你做事" in s_[1] for s_ in sent))
+
+print("== U61 巡检开跑之后、比对不采纳记录之前你点了「不采纳」：不当成别处加的（第二轮 R2-1-3；复核 RA-6）==")
+reset()
+put(ROWS)
+n.check(T, now_utc=NOW, task_present=False)
+_tk61 = re.search(r"handoff-rule:no/LG-03/([0-9a-f]{10})", page())
+_ep61 = n.ensure_published
+
+
+def _click_then_publish(t, st=None):
+    n.decide(f"handoff-rule:no/LG-03/{_tk61.group(1) if _tk61 else 'x'}", T)  # 巡检正在跑（先发布、后比对），你在处理页点了「不采纳」
+    return _ep61(t, st)
+
+
+n.ensure_published = _click_then_publish
+sent.clear(); sent_meta.clear()
+try:
+    n.check(T, now_utc=NOW + timedelta(hours=1), task_present=False)
+finally:
+    n.ensure_published = _ep61
+n.check(T, now_utc=NOW + timedelta(hours=5), task_present=False)
+ok("U61 不说「多了」", bool(_tk61) and not any("不采纳记录里多了" in s_[1] for s_ in sent))
+
+print("== U62 恢复一条老格式「否决（见否决记录）」的规矩（状态格没记原状态）：回执照实说还要手改（第二轮 R2-1-8；复核 RA-6）==")
+reset()
+put(BASE + ["| LG-04 | 否决（见否决记录） | 老格式规矩四 | 事 | 源 |"], veto_rows=[f"| LG-04 | {TODAY} | 负责人 | 旧 |"])
+n.check(T, now_utc=NOW, task_present=False)
+_ub62 = re.search(r"handoff-rule:unveto/LG-04/([0-9a-f]{10})", page())
+sent.clear(); sent_meta.clear()
+n.decide(f"handoff-rule:unveto/LG-04/{_ub62.group(1) if _ub62 else 'x'}", T)
+ok("U62 回执标题写「还要手改一下」", bool(_ub62) and any("还要手改一下" in (s_[0] or "") for s_ in sent))
+
+print("== U63 状态文件里 veto_seen 坏成了字典：点「不采纳」照常记账（第二轮 R2-2-3；复核 RA-6）==")
+reset()
+put(ROWS)
+n.check(T, now_utc=NOW, task_present=False)
+_st63 = nload()
+_st63["veto_seen"] = {"x": 1}
+nstate(_st63)
+_tk63 = re.search(r"handoff-rule:no/LG-03/([0-9a-f]{10})", page())
+_rc63 = n.decide(f"handoff-rule:no/LG-03/{_tk63.group(1) if _tk63 else 'x'}", T)
+ok("U63 返回 0、veto_seen 变回列表、只记 LG-03", _rc63 == 0 and nload().get("veto_seen") == ["LG-03"])
+
+print("== U65 同一轮新冒出 3 件要你做的事：没列出来的那件已算在「一共 N 件」里，不再说成「另有 1 条消息」（复核 RC-4）==")
+reset()
+put(BASE + [_L9])
+lstate({"last_scan_utc": _H34(40), "last_run": {"utc": _H34(40), "rc": 0}})
+n.check(T, now_utc=_N34, task_present=True)  # 第一轮：「连续 36 小时没成功」（之后仍然成立）
+put(BASE + [_L9, "| LG-07 | 乱写的状态 | 规矩七 | 事 | 源 |"])  # 第二轮新冒出：认不出的状态格
+io.open(VT, "ab").write(b"\n\xff\n")  # ……不采纳记录里的坏字节
+lstate({"last_scan_utc": _H34(40), "last_run": {"utc": _H34(40), "rc": 0}, **_U9})  # ……表外规矩
+sent.clear(); sent_meta.clear()
+n.check(T, now_utc=_N34 + timedelta(hours=1), task_present=True)
+_h65 = [s_[1] for s_ in sent if s_[3] is True]
+ok("U65 常驻弹窗写「要你做的事一共 4 件，处理页上都列着」，不另说「另有 N 条消息」",
+   bool(_h65) and "要你做的事一共 4 件，处理页上都列着" in _h65[0] and "另有" not in _h65[0])
 
 ok("U11 这一套跑下来，出口兜底一次都没命中（各调用点的源文案本身就是干净的）", n.SCRUB_HITS == [])
 

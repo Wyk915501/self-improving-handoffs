@@ -1,12 +1,14 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-handoff_notify.py —— 桌面通知、处理页与巡检（v1.13 · 2026-10-03；Windows 弹窗，Linux 只记日志并如实写"未送达"）
+handoff_notify.py —— 桌面通知、处理页与巡检（v1.14 · 2026-10-03；Windows 弹窗，Linux 只记日志并如实写"未送达"）
 
 负责人的用法（09-29 定）：新教训默认直接生效；弹窗只简述改动；觉得不合理才点进处理页，点「不采纳」撤回。
 10-03 第十批：弹窗先说事由、需要你做事的第二行写做法；内部编号与内部词由 toast() 出口强制挡掉；只是告知的静音、
 同类互相替换、到期自动消失；点弹窗正文直接打开处理页对应的那一区；点完按钮处理页当场重写、页面几秒后自己刷新；
 「不采纳」「不用」都能一键恢复；每日学习跑完立刻巡检一轮（新规矩当场简述，一次最多三条、每条恰好说一次）。
+10-03 第十一批：判「不采纳记录里少了 N 条」是不是负责人自己恢复的，只认晚于这条最近一次记进 veto_seen 的「恢复」
+（以前恢复后别处加了又删，会被当成负责人自己恢复而不说）。
 
   check <协作教训.md> [--with-scan <docs/工作传递>] [--scan-hours 8] [--with-flow <docs 根>] [--flow-days 2] [--source task|daily]
         巡检（计划任务每 4 小时；每日学习跑完也顺带一轮）：判断该不该提醒、去重后弹窗、写日志、重写处理页。弹窗分几类：
@@ -35,7 +37,7 @@ sys.dont_write_bytecode = True  # 不在正本目录（docs 同步域）里留 _
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import handoff_common as C  # noqa: E402
 
-VERSION = "1.13"
+VERSION = "1.14"
 BJ = C.BJ
 HERE = os.path.dirname(os.path.abspath(__file__))
 TOOLS = C.P.home
@@ -129,7 +131,7 @@ def _prune(st, cutoff):
 def _int(v):
     try:
         return int(v)
-    except (TypeError, ValueError):
+    except (TypeError, ValueError, OverflowError):  # 状态文件里的 1e999 读进来是 inf（复核 RB-6）
         return 0
 
 
@@ -159,6 +161,13 @@ def merge_save_state(st, cutoff=None):
         if isinstance(base, list) or add or rem:
             st["veto_seen"] = sorted((set(base or []) | add) - rem)
         st["veto_gen"] = _int(disk.get("veto_gen")) + (1 if (add or rem) else 0)
+        # 每个编号最近一次并进 veto_seen 的时刻：判「少了」是不是负责人自己恢复的，只认晚于它的「恢复」（第十一批，R2-1-4）。
+        # 记这一轮读否决记录的时刻、不记落盘时刻——巡检跑着时负责人点的「恢复」要算他自己的（复核 RB-1）；没有时刻的编号
+        # （升级前就在的、整份对齐进来的）一并补上，不然老编号永远按"最近一次是恢复就算负责人的"判（复核 RB-9）
+        obs = _int(st.pop("_veto_obs_ms", None)) or int(datetime.now(timezone.utc).timestamp() * 1000)
+        now_seen = st.get("veto_seen") if isinstance(st.get("veto_seen"), list) else []
+        sm = disk["veto_seen_ms"] if isinstance(disk.get("veto_seen_ms"), dict) else {}
+        st["veto_seen_ms"] = {k: sm.get(k, obs) for k in now_seen}  # 本轮新并进的、没有时刻的都记 obs；移出的随之丢掉
         if "badtok" in disk:
             st["badtok"] = disk["badtok"]
         for k, typ in (("last_decide", dict), ("acts", list)):
@@ -332,6 +341,9 @@ def _remember_veto(oid):
         seen.add(oid)
         st["veto_seen"] = sorted(seen)
         st["veto_gen"] = _int(st.get("veto_gen")) + 1
+        sm = st.get("veto_seen_ms") if isinstance(st.get("veto_seen_ms"), dict) else {}
+        sm[oid] = int(datetime.now(timezone.utc).timestamp() * 1000)
+        st["veto_seen_ms"] = sm
         save_json(STATE_PATH, st)
     finally:
         if got:
@@ -347,6 +359,9 @@ def _forget_veto(oid):
         seen = st.get("veto_seen") if isinstance(st.get("veto_seen"), list) else []
         st["veto_seen"] = sorted(set(seen) - {oid})
         st["veto_gen"] = _int(st.get("veto_gen")) + 1
+        sm = st.get("veto_seen_ms") if isinstance(st.get("veto_seen_ms"), dict) else {}
+        sm.pop(oid, None)
+        st["veto_seen_ms"] = sm
         save_json(STATE_PATH, st)
     except Exception as e:
         log(f"拍板：veto_seen 去掉 {oid} 失败（下一轮巡检按最近操作照样认得出）：{type(e).__name__}")
@@ -362,7 +377,7 @@ def _acts(st):
         if isinstance(a, dict) and isinstance(a.get("oid"), str) and isinstance(a.get("act"), str):
             try:
                 out.append(dict(a, ms=int(a.get("ms") or 0)))
-            except (TypeError, ValueError):
+            except (TypeError, ValueError, OverflowError):
                 continue
     return out
 
@@ -946,8 +961,8 @@ _MD_LINK = re.compile(r"\[([^\]]+)\]\(([^)\s]+)\)")
 def _safe_md(rel, base_dir):
     """出处／证据里的相对链接 → (docs 根下实存 .md 的绝对路径, "")，不合格 → (None, 原因)。
     **碰文件系统之前**先做纯字符串判断（解码之后）：带协议、以 / 或 \\ 开头、带盘符或 UNC、含 NUL、不是 .md 一律拒——
-    realpath／isfile 碰到 \\\\主机\\共享 会真去连 SMB：连不上抛 WinError 64 让巡检整轮崩掉，连得上还会把本机的
-    NTLM 凭据带过去（复核 B-01）。之后 realpath 与 isfile 也包在 try 里。"""
+    realpath／isfile 碰到 \\\\主机\\共享 会真去连 SMB：连不上抛 WinError 64 让巡检整轮崩掉（实测）；对端是恶意主机时
+    还可能把本机的 NTLM 凭据带过去（推断，未抓包；复核 B-01）。之后 realpath 与 isfile 也包在 try 里。"""
     r = urllib.parse.unquote(str(rel or ""))
     if (not r or "\x00" in r or C.is_remote_path(r) or re.match(r"^[A-Za-z][A-Za-z0-9+.-]*:", r) or r[0] in "/\\"
             or os.path.splitdrive(r)[0]
@@ -1223,10 +1238,14 @@ def ensure_published(table_path, st=None):
     撤下要等到第二天）。不一致就同机重发布；每日学习正占着锁时这轮先不动，连续 3 轮还没好才请负责人介入。
     返回 None（一致或已修好）或 (是否需要负责人, 说明)。"""
     pub = os.path.join(os.path.dirname(os.path.abspath(table_path)), C.PUBLISH_NAME)
+    bad_pub = False
     try:
         cur = C.sha(C.read_text(table_path))[:8]
         vh = C.veto_hash(table_path)
-        old = C.read_text(pub) if os.path.isfile(pub) else ""
+        try:
+            old = C.read_text(pub) if os.path.isfile(pub) else ""
+        except UnicodeDecodeError:  # 生效版混进了坏字节：它是程序生成的，当它不在、重新生成（复核 RA-5）
+            old, bad_pub = "", True
     except (OSError, UnicodeDecodeError) as e:
         return (True, f"生效版自检读文件失败：{type(e).__name__}")
     m = re.search(r"表哈希 ([0-9a-f]{8})(?: · 否决哈希 ([0-9a-f]{8}))?", old)
@@ -1234,7 +1253,7 @@ def ensure_published(table_path, st=None):
         if st is not None:
             st.pop("pub_busy", None)
         return None
-    why = ("生效版不存在" if not m else
+    why = ("生效版里有坏字节、读不出" if bad_pub else "生效版不存在" if not m else
            "否决记录变了、生效版还没跟上" if m.group(1) == cur else "表在上次发布之后被改过")
     if not AUTO_PUBLISH:
         return (False, why + "（自动重发布已关闭）")
@@ -1324,9 +1343,11 @@ def _rule_sections(text, table_path, st, ls0, now):
                 overdue = now >= datetime.strptime(raw, "%Y-%m-%d %H:%M").replace(tzinfo=BJ)
             except ValueError:
                 overdue = False
-            auto = bool(C.ADDED_ANY.search(c[4]))  # 出处格没有「加入 …（自动／人工）」标记的，promote 永远不转（复核 R2-1-8）
-            due = (("已于 {0} 到期，下一次自动学习会把它转成生效" if overdue else "将于 {0} 生效") if auto
-                   else "到期也不会自动生效（出处格缺「加入」标记，要手改）").format(raw)
+            # promote 永远不转的（出处格缺「加入」标记、到期距加入不足 48 小时）照实说要手改（复核 R2-1-8、RA-8）
+            blocker = C.pending_blocker(c[1], c[4])
+            auto = blocker is None
+            due = (("已于 {0} 到期，下一次自动学习会把它转成生效" if overdue else "将于 {0} 生效").format(raw) if auto
+                   else f"到期也不会自动生效（{blocker}，要手改）")
             pending.append((c[0], c[2], due, c[3], c[4], raw, auto))  # 过期了如实说（D-06）；raw 是提醒键用的原始时刻
     recent, fresh_live = [], []
     for c in rows:
@@ -1423,9 +1444,15 @@ def check(table_path, now_utc=None, task_present=None, scan_root=None, scan_hour
 
 _LS_TYPES = (("untrusted", dict), ("ext_trusted", dict), ("cap", dict), ("last_run", dict), ("last_start", dict),
              ("pending", list), ("skipped_reports", list))
-_TERM_SAY = {"no": "把 1 条规矩标成了不采纳", "unveto": "恢复了 1 条不采纳过的规矩", "ok": "把 1 条新规矩标成了看过了（以后不再简述）",
-             "trust": "放行了 1 条表外加进来的规矩", "adopt": "采纳了 1 条候选", "drop": "把 1 条候选标成了不用",
-             "undrop": "把 1 条不用过的候选恢复了"}
+# 终端替负责人做的事：一行说完——弹窗正文每行最多 60 字，撤法接在长句后面会被截掉（复核 RC-3）；撤法只写处理页上真有
+# 按钮的，没有的让 AI 改记录（复核 R2-1-7 ⓒ）。{r} 换成规矩或候选的前 10 个字（用 replace，不用 format：原文里可能有花括号）
+_TERM_LINE = {"no": "终端里有人不采纳了「{r}」（未核实是谁）；要撤：处理页「最近 30 天撤下的」点「恢复」",
+              "unveto": "终端里有人恢复了不采纳过的「{r}」（未核实是谁）；不同意就让 AI 把它加回不采纳记录",
+              "ok": "终端里有人把「{r}」标成看过了（未核实是谁）：以后不再简述，规矩照常生效",
+              "trust": "终端里有人放行了表外加进来的「{r}」（未核实是谁）；不同意就让 AI 把它加进不采纳记录",
+              "adopt": "终端里有人采纳了候选「{r}」（未核实是谁）；要撤：处理页「最近生效的规矩」点「不采纳」",
+              "drop": "终端里有人把候选「{r}」标成不用（未核实是谁）；要撤：处理页「最近 30 天撤下的」点「恢复为候选」",
+              "undrop": "终端里有人把不用过的候选「{r}」恢复了（未核实是谁）；要撤：处理页候选那一区点「不用」"}
 
 
 def _untrusted_text(info):
@@ -1520,14 +1547,18 @@ def _check(table_path, now_utc, task_present, scan_root, scan_hours, flow_root, 
             msgs.append((key, txt, kind))
 
     # ⓪ 生效版凭证：先发布、再读账本与 untrusted（复核 R2-04）
-    if not pages_only and bad_files:
-        log(f"{'、'.join(bad_files)}里有坏字节，这一轮不重发布生效版（别拿读错的表去发布）")
+    src_bad = [nm for nm in bad_files if nm != "生效版"]  # 生效版是程序生成的：只有它坏了就重新生成（复核 RA-5）
+    if not pages_only and src_bad:
+        log(f"{'、'.join(src_bad)}里有坏字节，这一轮不重发布生效版（别拿读错的表去发布）")
     elif not pages_only:
         pub_note = ensure_published(table_path, st)
         if pub_note:
             log(pub_note[1])
             if pub_note[0]:
                 need("pubfail", f"pubfail:{today}", "AI 读的那份规矩没能刷新：" + cut(C.toast_scrub(pub_note[1])[0], 40))
+        if "生效版" in bad_files and _utf8_ok(_pub_path):
+            bad_files.remove("生效版")
+            log("生效版里的坏字节已随重发布清掉")
     if bad_files and not pages_only:
         need("lint", f"lint:bytes:{today}", f"{'、'.join(bad_files)}里混进了不是 UTF-8 的坏字节（多半是用 PowerShell 的 "
                                               "Set-Content／Add-Content 写过），部分规矩可能读错")
@@ -1560,9 +1591,8 @@ def _check(table_path, now_utc, task_present, scan_root, scan_hours, flow_root, 
                     tell("auto:" + hashlib.sha256(ln.encode("utf-8")).hexdigest()[:10], t)
         # ③' 终端替负责人做的事（未核实是谁敲的）：告知一次——终端那边的回执是关掉的（复核 B-04）
         for a in st["acts"]:
-            if a.get("src") == "terminal" and a["ms"] >= cut_ms and a.get("act") in _TERM_SAY:
-                tell(f"term:{a['act']}:{a['oid']}:{a['ms']}",
-                     f"终端里有人{_TERM_SAY[a['act']]}（未核实是谁）：「{cut(str(a.get('rule', '')), 16)}」，不同意就去处理页撤销")
+            if a.get("src") == "terminal" and a["ms"] >= cut_ms and a.get("act") in _TERM_LINE:
+                tell(f"term:{a['act']}:{a['oid']}:{a['ms']}", _TERM_LINE[a["act"]].replace("{r}", cut(str(a.get("rule", "")), 10)))
 
     # ④ 每日学习有没有跑成：计划任务结果码按语义判；同一次运行脚本自己记了结果的，以脚本记录为准，不重复报。
     #    10-03 起偶发的一次没跑成只轻声告知（下一轮会再跑）；连续 36 小时没成功才请负责人介入（stale）
@@ -1638,6 +1668,7 @@ def _check(table_path, now_utc, task_present, scan_root, scan_hours, flow_root, 
         # ⑤' 不采纳记录的变化。veto_seen＝负责人已经知道的不采纳编号：处理页／终端点「不采纳」当场记进去、点「恢复」当场移出。
         #     别处加的（多半是同步来的）说「多了 N 条」，别处删的说「少了 N 条」；**送达了（或三次放弃）才改 veto_seen**——
         #     这一轮挤不进弹窗的，下一轮按同一个键接着说（复核 A-01、A-02、C-03：以前当轮就并进去，挤掉了就再也不说）
+        st["_veto_obs_ms"] = int(datetime.now(timezone.utc).timestamp() * 1000)  # 读否决记录的时刻（落盘时取出，不存，复核 RB-1）
         vt_rows = _veto_rows(table_path)
         disk0 = load_json(STATE_PATH, {}) or {}  # 比对前重读：开跑之后负责人点的「不采纳／恢复」以磁盘为准（复核 R2-1-3）
         if isinstance(disk0.get("veto_seen"), list):
@@ -1645,6 +1676,7 @@ def _check(table_path, now_utc, task_present, scan_root, scan_hours, flow_root, 
         if isinstance(disk0.get("acts"), list):
             st["acts"] = _acts(disk0)
         gen = _int(disk0.get("veto_gen"))
+        seen_ms = disk0.get("veto_seen_ms") if isinstance(disk0.get("veto_seen_ms"), dict) else {}
         if not st.get("veto_v2") or not isinstance(st.get("veto_seen"), list):
             # 升级首轮（或从没比过）：现有的不采纳都当已知、不告知——旧版 veto_seen 只增不减，拿它比会把负责人早先恢复过的
             # 误报成"少了"（复核 R2-1-5）
@@ -1656,7 +1688,10 @@ def _check(table_path, now_utc, task_present, scan_root, scan_hours, flow_root, 
         for a in st["acts"]:
             if a["oid"] in removed and a["ms"] >= latest.get(a["oid"], {}).get("ms", -1):
                 latest[a["oid"]] = a
-        mine = [lid for lid in removed if latest.get(lid, {}).get("act") == "unveto"]  # 负责人在处理页或终端恢复的
+        # 负责人在处理页或终端恢复的：最近一次操作是「恢复」，而且晚于这个编号最近一次并进 veto_seen 的时刻——恢复之后
+        # 别处又加了（已告知「多了」）、再被别处删掉的，不算负责人自己恢复，照样说「少了」（第十一批，R2-1-4）
+        mine = [lid for lid in removed if latest.get(lid, {}).get("act") == "unveto"
+                and latest[lid]["ms"] > _int(seen_ms.get(lid, -1))]
         st.setdefault("_veto_remove", []).extend(mine)
         other = [lid for lid in removed if lid not in mine]
         for ids, key, txt, how in (
@@ -1873,9 +1908,9 @@ def _check(table_path, now_utc, task_present, scan_root, scan_hours, flow_root, 
         extra = max(0, len(conds) - len(need_m))  # 之前提醒过、仍然成立的要你做的事（同类弹窗会替换掉旧的那条，复核 A-03）
         shown = rest[:2] if (len(rest) <= 2 and not extra) else rest[:1]
         lines += [m[1] for m in shown]
-        if extra:
-            lines.append(f"要你做的事一共 {len(conds)} 件" + (f"，另有 {len(rest) - len(shown)} 条消息" if len(rest) > len(shown) else "")
-                         + "，处理页上都列着")
+        if extra:  # 处理页上列着的只是要你做的事；挤掉的告知不在页上，下一轮接着说（复核 R2-1-7 ⓐ）
+            k = sum(1 for m in rest if m not in shown and m[2] != "need")  # 没列出来的要你做的事已含在 N 里，不另算（复核 RC-4）
+            lines.append(f"要你做的事一共 {len(conds)} 件，处理页上都列着" + (f"；另有 {k} 条消息，下一轮接着说" if k > 0 else ""))
         elif len(rest) > len(shown):
             lines.append(f"另有 {len(rest) - len(shown)} 件，下一轮接着说")
         ok = toast(title, "\n".join(lines), kind="need")
@@ -1896,7 +1931,7 @@ def _check(table_path, now_utc, task_present, scan_root, scan_hours, flow_root, 
         else:
             kind = "info"
             shown = other_m[:4] if len(other_m) <= 4 else other_m[:3]
-            if conds or any(m[0].startswith(("term:", "vetoext:", "vetoback:")) for m in shown):
+            if conds or any(m[0].startswith(("term:", "vetoext:", "vetoback:")) for m in other_m):  # 看全部，不只看列出来的（R2-1-7 ⓑ）
                 # 有仍然成立的要你做的事（复核 A-06），或说的是别处／终端做的事（不是"系统自动处理"，复核 R2-1-7）
                 title = f"知会一声（{len(other_m)} 件）" if len(other_m) > 1 else "知会一声"
             else:

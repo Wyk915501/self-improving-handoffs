@@ -20,6 +20,7 @@ spec.loader.exec_module(m)
 
 TODAY = m.now_bj().strftime("%Y-%m-%d")
 results = []
+skips = []  # SKIP 不是 PASS：单独列在合计行里
 
 
 def ok(name, cond):
@@ -274,6 +275,8 @@ finally:
         os.environ["GLM_API_KEY"] = _k
 seen = {}
 REAL_GLM_CC = m.call_model_glm_cc
+REAL_CLAUDE = m.call_model_claude  # CC13f 要测真的那个
+REAL_GLM = m.call_model_glm  # CC11g 要测真的那个
 m.call_model_glm = lambda prompt, model=None: seen.setdefault("glm", model) or {"scanned": 0, "candidates": []}
 m.call_model_glm_cc = lambda prompt, model=None: seen.setdefault("glm_cc", model) or {"scanned": 0, "candidates": []}
 m.call_model_claude = lambda prompt, model, config_dir=None: seen.setdefault("claude", model) or {"scanned": 0, "candidates": []}
@@ -990,6 +993,7 @@ ok("Z13 acquire_lock 正常返回 True", _ok13 is True)
 print("== Z14 锁里记的 PID 被复用（那个进程晚于加锁时刻才启动）：当场清，不等 6 小时（复核 R2-08）==")
 _me = m.C.pid_started_utc(os.getpid())
 if _me is None:
+    skips.append("Z14")
     print("  SKIP Z14 本平台取不到进程启动时刻（不计入通过）")
 else:
     _lp14 = os.path.join(ROOT, "reuse.lock")
@@ -1004,7 +1008,7 @@ else:
 
 print("== CC 经 Claude Code 调 GLM（合规通道，10-03）：命令、环境、结果分类、密钥不外泄（假子进程，不真起 claude）==")
 import contextlib as _cl
-_saved_run, _saved_exe = m.subprocess.run, m._claude_exe
+_saved_run, _saved_exe = m._run_tree, m._claude_exe  # 第十一批：claude 子进程改经 _run_tree（超时结束整棵进程树）
 _KEY = "test-glm-key-0123456789abcdef"
 _k0, _tok0 = os.environ.get("GLM_API_KEY"), os.environ.get("ANTHROPIC_AUTH_TOKEN")
 os.environ["GLM_API_KEY"] = _KEY
@@ -1028,7 +1032,7 @@ def _fake(seq):
 
 m._claude_exe = lambda: "claude-fake"
 try:
-    m.subprocess.run = _fake([_R(0, json.dumps({"is_error": False, "structured_output": {"scanned": 1, "candidates": []},
+    m._run_tree = _fake([_R(0, json.dumps({"is_error": False, "structured_output": {"scanned": 1, "candidates": []},
                                                "usage": {"input_tokens": 10, "output_tokens": 5}, "modelUsage": {"glm-5.3": {}},
                                                "num_turns": 2}))])
     _buf = io.StringIO()
@@ -1047,7 +1051,7 @@ try:
        and "ANTHROPIC_AUTH_TOKEN" not in _env and _env.get("CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC") == "1"
        and _KEY not in " ".join(_cmd) and _KEY not in _buf.getvalue() and "订阅额度" in _buf.getvalue())
 
-    m.subprocess.run = _fake([_R(0, json.dumps({"is_error": True, "result": f"API Error: 401 invalid key {_KEY}"}))])
+    m._run_tree = _fake([_R(0, json.dumps({"is_error": True, "result": f"API Error: 401 invalid key {_KEY}"}))])
     try:
         REAL_GLM_CC("p")
         _c3 = "没抛"
@@ -1057,7 +1061,7 @@ try:
         _c3 = f"抛错类型不对：{type(_e).__name__}"
     ok("CC3 服务端或认证出错 → RuntimeError（这一轮失败、原样报），报错里密钥已遮掉", "401" in _c3 and _KEY not in _c3)
 
-    m.subprocess.run = _fake([_R(0, json.dumps({"is_error": True, "result": "API Error: Claude's response exceeded the 32000 output token "
+    m._run_tree = _fake([_R(0, json.dumps({"is_error": True, "result": "API Error: Claude's response exceeded the 32000 output token "
                                                "maximum. To configure this behavior, set the CLAUDE_CODE_MAX_OUTPUT_TOKENS environment variable."}))])  # Claude Code 的真实截断文案（第十批复核 R2-2-4 后夹具改用原文）
     try:
         REAL_GLM_CC("p")
@@ -1068,7 +1072,7 @@ try:
         _c4 = False
     ok("CC4 输出被截断、没交出结构化结果 → 按输出坏了处理（ModelOutputError，走下轮批量减半）", _c4)
 
-    m.subprocess.run = _fake([_R(1, "", f"boom {_KEY}")])
+    m._run_tree = _fake([_R(1, "", f"boom {_KEY}")])
     try:
         REAL_GLM_CC("p")
         _c5 = "没抛"
@@ -1077,7 +1081,7 @@ try:
     ok("CC5 claude 进程失败 → RuntimeError，stderr 里的密钥遮掉", "退出码 1" in _c5 and _KEY not in _c5 and "***" in _c5)
 
     _calls.clear()
-    m.subprocess.run = _fake([_R(0, json.dumps({"is_error": False, "result": "{\"scanned\": 1, \"candidates\": [,]"})),
+    m._run_tree = _fake([_R(0, json.dumps({"is_error": False, "result": "{\"scanned\": 1, \"candidates\": [,]"})),
                               _R(0, json.dumps({"is_error": False, "result": "{\"scanned\": 1, \"candidates\": []}"}))])
     with _cl.redirect_stdout(io.StringIO()):
         _r6 = REAL_GLM_CC("p")
@@ -1096,7 +1100,7 @@ try:
     os.environ["GLM_API_KEY"] = _KEY
 
     def _cls(obj):
-        m.subprocess.run = _fake([_R(0, json.dumps(obj))])
+        m._run_tree = _fake([_R(0, json.dumps(obj))])
         try:
             with _cl.redirect_stdout(io.StringIO()):
                 REAL_GLM_CC("p")
@@ -1112,7 +1116,7 @@ try:
        _cls({"is_error": True, "result": "API Error: Claude's response exceeded the 32000 output token maximum."}) == "坏输出")
     ok("CC10 轮数用尽 → 输出坏了", _cls({"is_error": True, "subtype": "error_max_turns", "result": ""}) == "坏输出")
     ok("CC11 超时之类其余出错 → 这一轮失败", _cls({"is_error": True, "result": "Request timed out"}) == "失败")
-    m.subprocess.run = _fake([_R(0, json.dumps({"is_error": False, "result": "{\"scanned\": 1, \"candidates\": [,]"})), _R(1, "", "boom")])
+    m._run_tree = _fake([_R(0, json.dumps({"is_error": False, "result": "{\"scanned\": 1, \"candidates\": [,]"})), _R(1, "", "boom")])
     try:
         with _cl.redirect_stdout(io.StringIO()):
             REAL_GLM_CC("p")
@@ -1122,6 +1126,65 @@ try:
     except RuntimeError:
         _c11b = "失败"
     ok("CC11b 正文坏了、请修语法那一步进程失败：按这一轮失败报（不再包成「输出坏了」，复核 R2-2-4）", _c11b == "失败")
+    ok("CC10b 截断只认 Claude Code 的原文：「Invalid max_tokens」「超了输出 token 配额」不是截断，这一轮失败（第二轮 R2-2-4；复核 RA-6）",
+       _cls({"is_error": True, "result": "API Error: 400 Invalid max_tokens: must be at most 32000"}) == "失败"
+       and _cls({"is_error": True, "result": "API Error: 429 You exceeded the quota for output tokens"}) == "失败")
+
+    def _two(second):
+        m._run_tree = _fake([_R(0, json.dumps({"is_error": False, "result": "{\"scanned\": 1, \"candidates\": [,]"})),
+                             _R(0, json.dumps(second))])
+        try:
+            with _cl.redirect_stdout(io.StringIO()):
+                REAL_GLM_CC("p")
+            return "没抛"
+        except m.ModelOutputError:
+            return "坏输出"
+        except RuntimeError:
+            return "失败"
+    ok("CC11c 正文坏了、请便宜模型修语法那一步连不上（Claude Code 以 is_error 交回）：这一轮失败，不算输出坏了（复核 RA-2）",
+       _two({"is_error": True, "subtype": "success",
+             "result": "API Error: Connection refused — a firewall or proxy may be blocking it (ConnectionRefused)"}) == "失败")
+    ok("CC11d 修语法那一步被限频、错误文字里带 JSON 体：这一轮失败，错误体不当成模型结果（复核 RA-2）",
+       _two({"is_error": True, "result": "API Error: 429 {\"error\":{\"code\":\"1302\",\"message\":\"rate limit\"}}"}) == "失败")
+    m._run_tree = _fake([_R(0, json.dumps({"is_error": False, "result": "{\"error\": {\"code\": 1302}}"})),
+                         _R(0, json.dumps({"is_error": False, "result": "{\"error\": {\"code\": 1302}}"}))])
+    try:
+        with _cl.redirect_stdout(io.StringIO()):
+            REAL_GLM_CC("p")
+        _c11e = "没抛"
+    except m.ModelOutputError:
+        _c11e = "坏输出"
+    except RuntimeError:
+        _c11e = "失败"
+    ok("CC11e 交回的 JSON 没有 candidates 列表（错误体之类）：按输出坏了处理，不当成「0 条候选」把这批报告记成已读（复核 RA-2）",
+       _c11e == "坏输出")
+    m._run_tree = _fake([_R(0, json.dumps({"is_error": False, "result": "{\"error\": {\"code\": 1302}}"}))])
+    _w11f = m.shutil.which
+    m.shutil.which = lambda name: "claude-fake"
+    try:
+        with _cl.redirect_stdout(io.StringIO()):
+            REAL_CLAUDE("p", "sonnet")
+        _c11f = "没抛"
+    except m.ModelOutputError:
+        _c11f = "坏输出"
+    except RuntimeError:
+        _c11f = "失败"
+    finally:
+        m.shutil.which = _w11f
+    ok("CC11f 本机 Claude 账号那条路：交回的 JSON 没有 candidates 列表 → 按输出坏了处理（复核 RC-5）", _c11f == "坏输出")
+    _gt11g = m.call_model_glm_text
+    m.call_model_glm_text = lambda prompt, model=None: ("{\"error\": {\"code\": 1302}}", {})
+    try:
+        with _cl.redirect_stdout(io.StringIO()):
+            REAL_GLM("p")
+        _c11g = "没抛"
+    except m.ModelOutputError:
+        _c11g = "坏输出"
+    except RuntimeError:
+        _c11g = "失败"
+    finally:
+        m.call_model_glm_text = _gt11g
+    ok("CC11g 直连按量端点那条路：交回的 JSON 没有 candidates 列表 → 按输出坏了处理（复核 RC-5）", _c11g == "坏输出")
     _calls.clear()
     m._DEADLINE[0] = time.time() + 60
     try:
@@ -1133,7 +1196,7 @@ try:
         m._DEADLINE[0] = None
     ok("CC12 计划任务剩下的时间不够再调一次模型：不起子进程、这一轮失败（复核 C-07）", "时间不够" in _c12 and not _calls)
 finally:
-    m.subprocess.run, m._claude_exe = _saved_run, _saved_exe
+    m._run_tree, m._claude_exe = _saved_run, _saved_exe
     if _k0 is None:
         os.environ.pop("GLM_API_KEY", None)
     else:
@@ -1142,6 +1205,265 @@ finally:
         os.environ.pop("ANTHROPIC_AUTH_TOKEN", None)
     else:
         os.environ["ANTHROPIC_AUTH_TOKEN"] = _tok0
+
+print("== CC13 经 _run_tree 起子进程：超时或出异常都结束整棵进程树；环境、工作目录、标准输入原样交给子进程（复核 C-05 兜底、RB-2、RB-3、RB-7）==")
+import signal, subprocess  # noqa: E402
+_r13a = m._run_tree([sys.executable, "-c", "import sys; print(sys.stdin.read().upper())"], input="abc", timeout=60)
+ok("CC13a 正常跑完：照常交回退出码与输出（提示词走标准输入）", _r13a.returncode == 0 and _r13a.stdout.strip() == "ABC")
+
+
+def _alive13(pid):
+    if os.name == "nt":
+        import ctypes
+        k = ctypes.windll.kernel32
+        h = k.OpenProcess(0x1000, False, pid)  # PROCESS_QUERY_LIMITED_INFORMATION
+        if not h:
+            return False
+        code = ctypes.c_ulong()
+        k.GetExitCodeProcess(h, ctypes.byref(code))
+        k.CloseHandle(h)
+        return code.value == 259  # STILL_ACTIVE
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True
+    try:  # 已经死了、还没被收尸的僵尸也算结束
+        with open(f"/proc/{pid}/stat") as _f:
+            return _f.read().rsplit(")", 1)[-1].split()[0] != "Z"
+    except OSError:
+        return True
+
+
+def _tree13():
+    """一棵"子进程等孙进程、孙进程握着输出管道"的树（和 npm 垫片 cmd.exe → claude.exe 一样）。孙进程最多睡 90 秒、
+    看见停止文件就退出——测试收尾写停止文件，不按进程号去杀（进程号会被复用，复核 RB-11）。"""
+    d = tempfile.mkdtemp(prefix="hl_tree_")
+    pidf, stop, gc, ch = (os.path.join(d, x) for x in ("gc.pid", "stop", "gc.py", "child.py"))
+    io.open(gc, "w", encoding="utf-8").write(
+        f"import os, time\nopen({pidf!r}, 'w').write(str(os.getpid()))\n"
+        f"for _ in range(900):\n    if os.path.exists({stop!r}):\n        break\n    time.sleep(0.1)\n")
+    io.open(ch, "w", encoding="utf-8").write(
+        f"import subprocess, sys\nsubprocess.call([sys.executable, {gc!r}], stdin=subprocess.DEVNULL, stdout=sys.stdout, stderr=sys.stderr)\n")
+    return d, pidf, stop, ch
+
+
+def _reap13(d, pidf, stop):
+    """孙进程是否已经结束（最多等 5 秒）；然后一律写停止文件、清临时目录。"""
+    gp = int(io.open(pidf).read()) if os.path.exists(pidf) else None
+    dead = False
+    for _ in range(50):
+        if gp is not None and not _alive13(gp):
+            dead = True
+            break
+        time.sleep(0.1)
+    io.open(stop, "w").write("x")
+    time.sleep(0.3)
+    shutil.rmtree(d, ignore_errors=True)
+    return dead
+
+
+_d, _pf, _st, _ch = _tree13()
+_r13, _t13 = "没跑", time.time()
+try:
+    m._run_tree([sys.executable, _ch], input="", timeout=6)
+    _r13 = "没超时"
+except subprocess.TimeoutExpired:
+    _r13 = "超时"
+except Exception as _e:
+    _r13 = f"抛错类型不对：{type(_e).__name__}"
+finally:
+    _e13 = time.time() - _t13
+    _dead13 = _reap13(_d, _pf, _st)
+ok(f"CC13b 超时：6 秒到点就交回（实测 {_e13:.1f} 秒，上限 14 秒——只杀直接子进程、或先干等收尾再杀的写法都超；复核 RB-8），"
+   "孙进程也已结束、不留孤儿", _r13 == "超时" and _e13 < 14 and _dead13)
+
+_kw13, _P13 = {}, m.subprocess.Popen
+
+
+class _PopenSpy(_P13):
+    def __init__(self, *a, **k):
+        _kw13.update(k)
+        super().__init__(*a, **k)
+
+
+_cwd13 = tempfile.mkdtemp(prefix="hl_cwd_")
+_probe13 = ("import os, sys, json; sys.stdout.reconfigure(encoding='utf-8'); "
+            "print(json.dumps({'cwd': os.getcwd(), 'base': os.environ.get('ANTHROPIC_BASE_URL'), "
+            "'tok': 'ANTHROPIC_AUTH_TOKEN' in os.environ, 'inp': sys.stdin.buffer.read().decode('utf-8')}, ensure_ascii=False)); "
+            "sys.stdout.flush(); sys.stdout.buffer.write(b'\\xff\\xfe tail')")
+_tok13 = os.environ.get("ANTHROPIC_AUTH_TOKEN")
+os.environ["ANTHROPIC_AUTH_TOKEN"] = "parent-session-token"  # 父进程里别的提供方的设置，子进程里必须看不到
+m.subprocess.Popen = _PopenSpy
+try:
+    _r13c = m._run_tree([sys.executable, "-c", _probe13], input="提示词 ✓", timeout=60, env=m._glm_cc_env(_KEY), cwd=_cwd13)
+    _o13 = json.loads(_r13c.stdout.splitlines()[0])
+except Exception as _e:
+    _r13c, _o13 = None, {"err": repr(_e)}
+finally:
+    m.subprocess.Popen = _P13
+    if _tok13 is None:
+        os.environ.pop("ANTHROPIC_AUTH_TOKEN", None)
+    else:
+        os.environ["ANTHROPIC_AUTH_TOKEN"] = _tok13
+_same = lambda x, y: os.path.normcase(os.path.realpath(x)) == os.path.normcase(os.path.realpath(y))
+ok("CC13c 子进程看到的：工作目录是给定的空临时目录（--setting-sources project 才什么都不加载）、端点是智谱、没有父进程的 "
+   "ANTHROPIC_AUTH_TOKEN、提示词逐字（含中文）；输出里的坏字节不让解码崩；Windows 上不闪控制台窗口（复核 RB-3）",
+   _r13c is not None and _same(_o13.get("cwd", ""), _cwd13) and _o13.get("base") == "https://open.bigmodel.cn/api/anthropic"
+   and _o13.get("tok") is False and _o13.get("inp") == "提示词 ✓" and "tail" in _r13c.stdout
+   and ((_kw13.get("creationflags", 0) & 0x08000000) if os.name == "nt" else _kw13.get("start_new_session") is True))
+shutil.rmtree(_cwd13, ignore_errors=True)
+
+_d, _pf, _st, _ch = _tree13()
+
+
+class _PopenKbi(_P13):
+    n = 0
+
+    def communicate(self, input=None, timeout=None):
+        _PopenKbi.n += 1
+        if _PopenKbi.n == 1:  # 等孙进程起来以后，模拟手动跑时按了 Ctrl-C
+            for _ in range(150):
+                if os.path.exists(_pf):
+                    break
+                time.sleep(0.1)
+            raise KeyboardInterrupt
+        return super().communicate(input, timeout)
+
+
+m.subprocess.Popen = _PopenKbi
+try:
+    m._run_tree([sys.executable, _ch], input="", timeout=60)
+    _r13d = "没抛"
+except KeyboardInterrupt:
+    _r13d = "KeyboardInterrupt"
+except Exception as _e:
+    _r13d = type(_e).__name__
+finally:
+    m.subprocess.Popen = _P13
+    _dead13d = _reap13(_d, _pf, _st)
+ok("CC13d 等待中按了 Ctrl-C：异常照样上抛，整棵树先被结束（复核 RB-2：以前只有超时才杀，别的系统上子进程会脱离终端接着跑）",
+   _r13d == "KeyboardInterrupt" and _dead13d)
+
+_t13e = time.time()
+try:
+    m._run_tree([sys.executable, "-c", "import time; time.sleep(30)"], input="字" * 100000, timeout=3)
+    _r13e = "没超时"
+except subprocess.TimeoutExpired:
+    _r13e = "超时"
+_e13e = time.time() - _t13e
+ok(f"CC13e 子进程不读标准输入、提示词又比管道缓冲大：3 秒到点照样交回（实测 {_e13e:.1f} 秒；以前在 Windows 上要等它自己退出，复核 RB-7）",
+   _r13e == "超时" and _e13e < 15)
+
+_calls13, _rt13, _which13 = [], m._run_tree, m.shutil.which
+m._run_tree = lambda cmd, **kw: (_calls13.append((cmd, kw)), subprocess.CompletedProcess(
+    cmd, 0, json.dumps({"is_error": False, "structured_output": {"scanned": 0, "candidates": []}, "usage": {}}), ""))[1]
+m.shutil.which = lambda name: "claude-fake"
+try:
+    with _cl.redirect_stdout(io.StringIO()):
+        _r13f = REAL_CLAUDE("提示词", "sonnet")
+except Exception as _e:  # 绕过 _run_tree 直接起 claude-fake 会抛错：记成不通过，不让整套崩
+    _r13f = f"抛错：{type(_e).__name__}"
+finally:
+    m._run_tree, m.shutil.which = _rt13, _which13
+ok("CC13f 改用本机 Claude 账号时也经 _run_tree（sonnet 带 --effort max、时限 1800 秒、提示词走标准输入；复核 RB-3）",
+   _r13f == {"scanned": 0, "candidates": []} and len(_calls13) == 1 and "--effort" in _calls13[0][0]
+   and _calls13[0][0][_calls13[0][0].index("--effort") + 1] == "max" and _calls13[0][1].get("timeout") == 1800
+   and _calls13[0][1].get("input") == "提示词")
+
+if os.name == "nt":
+    skips.append("CC13g")
+    print("  SKIP CC13g POSIX 上收到 SIGTERM（timeout 命令到点、关终端）也先结束整棵树（Windows 没有这层信号语义；不计入通过）")
+else:
+    _d, _pf, _st, _ch = _tree13()
+    _drv = os.path.join(_d, "drv.py")
+    io.open(_drv, "w", encoding="utf-8").write(
+        "import sys, importlib.util\n"
+        f"spec = importlib.util.spec_from_file_location('L', {LESSONS!r})\n"
+        "L = importlib.util.module_from_spec(spec)\nspec.loader.exec_module(L)\n"
+        "L._posix_term_as_exit()\n"
+        f"L._run_tree([sys.executable, {_ch!r}], input='', timeout=60)\n")
+    _drvp = subprocess.Popen([sys.executable, "-X", "utf8", "-B", _drv])
+    for _ in range(150):  # 等孙进程起来
+        if os.path.exists(_pf):
+            break
+        time.sleep(0.1)
+    _drvp.send_signal(signal.SIGTERM)
+    try:
+        _rc13g = _drvp.wait(timeout=30)
+    except subprocess.TimeoutExpired:
+        _drvp.kill()
+        _rc13g = None
+    _dead13g = _reap13(_d, _pf, _st)
+    ok("CC13g POSIX 上收到 SIGTERM（timeout 命令到点、关终端）：先结束整棵树再退出（退出码 143；复核 RB-2）",
+       _rc13g == 128 + signal.SIGTERM and _dead13g)
+
+_d, _pf, _st, _ch = _tree13()
+io.open(_ch, "w", encoding="utf-8").write(  # 链条断了的形状：子进程起了握着输出管道的孙进程，自己不等它、先退出
+    f"import subprocess, sys\nsubprocess.Popen([sys.executable, {os.path.join(_d, 'gc.py')!r}], stdin=subprocess.DEVNULL, "
+    "stdout=sys.stdout, stderr=sys.stderr)\n")
+_r13h, _t13h = "没跑", time.time()
+try:
+    m._run_tree([sys.executable, _ch], input="", timeout=3)
+    _r13h = "没超时"
+except subprocess.TimeoutExpired:
+    _r13h = "超时"
+except Exception as _e:
+    _r13h = f"抛错类型不对：{type(_e).__name__}"
+finally:
+    _e13h = time.time() - _t13h
+    _reap13(_d, _pf, _st)
+ok(f"CC13h 链条断了（子进程先退出、孙进程握着输出管道，Windows 的 taskkill /T 够不着它）：到点后最多再等 10 秒就交回"
+   f"（实测 {_e13h:.1f} 秒，上限 25 秒；复核 RC-1：with 收尾关读端时要陪着等孙进程自己退出）", _r13h == "超时" and _e13h < 25)
+
+_cmd13j = [sys.executable, "-c", "import time; time.sleep(30)"]
+
+
+class _PopenLate(_P13):
+    n = 0
+
+    def communicate(self, input=None, timeout=None):
+        if self.args == _cmd13j:
+            _PopenLate.n += 1
+            if _PopenLate.n == 1:
+                raise subprocess.TimeoutExpired(self.args, timeout)  # 到点
+            if _PopenLate.n == 2:
+                raise KeyboardInterrupt  # 收尾等待的那几秒里又按了 Ctrl-C
+        return super().communicate(input, timeout)
+
+
+m.subprocess.Popen = _PopenLate
+try:
+    m._run_tree(_cmd13j, input="", timeout=60)
+    _r13j = "没抛"
+except KeyboardInterrupt:
+    _r13j = "KeyboardInterrupt"
+except subprocess.TimeoutExpired:
+    _r13j = "TimeoutExpired"
+finally:
+    m.subprocess.Popen = _P13
+ok("CC13j 到点后收尾等待时又按了 Ctrl-C（或收到终止信号）：抛的是这次中断，不被吞成普通超时、让每日学习接着跑（复核 RC-6）",
+   _r13j == "KeyboardInterrupt")
+
+if os.name == "nt":
+    skips.append("CC13i")
+    print("  SKIP CC13i POSIX：nohup 设成忽略的 SIGHUP 不动、run_cli 收尾还原处理器（Windows 没有这层信号语义；不计入通过）")
+else:
+    _h13i = signal.signal(signal.SIGHUP, signal.SIG_IGN)  # 模拟 nohup
+    try:
+        _old13i = m._posix_term_as_exit()
+        _ign13i = signal.getsignal(signal.SIGHUP) == signal.SIG_IGN
+        _term13i = signal.getsignal(signal.SIGTERM) not in (signal.SIG_DFL, None)
+        for _s, _h in _old13i.items():
+            signal.signal(_s, _h)
+        with _cl.redirect_stdout(io.StringIO()):
+            m.run_cli(["没有这个命令"])
+        _back13i = signal.getsignal(signal.SIGTERM) == signal.SIG_DFL
+    finally:
+        signal.signal(signal.SIGHUP, _h13i)
+    ok("CC13i POSIX：nohup 设成忽略的 SIGHUP 不动；SIGTERM 装上处理器；run_cli 收尾后还原成默认（复核 RC-6）",
+       _ign13i and _term13i and _back13i)
 
 print("== Z15 每批预算：经 Claude Code 调 GLM 时取 6 万字符与原预算小的那个（输出上限 32000 token）==")
 _pv = m.PROVIDER
@@ -1189,6 +1511,6 @@ for _p in _z16:
 ok("Z 每日学习这边发出的弹窗（看门狗停了等）出口兜底一次都没命中（命中的：" + repr(_N.SCRUB_HITS[:2]) + "）", _N.SCRUB_HITS == [])
 
 n_fail = sum(1 for _, c in results if not c)
-print(f"\n合计 {len(results)} 项，失败 {n_fail} 项")
+print(f"\n合计 {len(results)} 项，失败 {n_fail} 项" + (f"；跳过 {len(skips)} 项（{'、'.join(skips)}）" if skips else ""))
 shutil.rmtree(ROOT, ignore_errors=True)
 sys.exit(1 if n_fail else 0)

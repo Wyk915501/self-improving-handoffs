@@ -106,7 +106,7 @@ def candidates(raw, report_path, docs_root, ws_root, prefix_map):
                     os.path.normpath(os.path.join(os.path.dirname(report_path), vv))]
     seen, res = set(), []
     for c in out:
-        if c not in seen:
+        if c not in seen and not C.is_remote_path(c):  # normpath 之后再判一次：/??/… 在 Windows 上会被改写成 \??\…（复核 RA-1）
             seen.add(c)
             res.append(c)
     return res
